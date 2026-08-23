@@ -31,6 +31,20 @@ was chosen as it is the standard location for resources in `jar` files as define
 Quarkus can be used without Servlet, following this convention allows existing code that places its resources in this
 location to function correctly.
 
+==== Reloading the browser in development mode
+
+In development mode, a changed static resource is served on the next request, but the browser has to be refreshed to see it.
+Setting `quarkus.http.browser-live-reload=true` makes Quarkus notify the browsers showing a page of the application when a
+static resource changes, or when any other file that does not require a restart changes, such as a template: a changed
+style sheet is applied in place, anything else reloads the page. The page has to include the script served by Quarkus:
+
+[source,html]
+----
+<script src="/q/browser-live-reload.js"></script>
+----
+
+The setting has no effect outside of development mode, and the script is not served in a packaged application, so the tag can stay in the page.
+
 === From web dependencies like webjars or mvnpm
 
 Look at the xref:web-dependency-locator.adoc[Web dependency locator] guide for details on how to use https://www.webjars.org[WebJars], https://mvnpm.org[mvnpm] and https://developer.mozilla.org/en-US/docs/Web/HTML/Element/script/type/importmap[importmaps]

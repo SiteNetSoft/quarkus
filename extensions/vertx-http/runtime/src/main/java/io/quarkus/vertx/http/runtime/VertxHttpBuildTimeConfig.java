@@ -112,6 +112,18 @@ public interface VertxHttpBuildTimeConfig {
     Optional<List<String>> compressMediaTypes();
 
     /**
+     * Whether, in development mode, browsers showing a page of the application are notified when a static resource
+     * under {@code META-INF/resources} changes, so that they reload it without a manual refresh.
+     * <p>
+     * The page has to include the script served at {@code /q/browser-live-reload.js}. A change to a style sheet is
+     * applied in place; any other change reloads the page.
+     * <p>
+     * This setting has no effect outside of development mode.
+     */
+    @WithDefault("false")
+    boolean browserLiveReload();
+
+    /**
      * The compression level used when compression support is enabled.
      */
     OptionalInt compressionLevel();

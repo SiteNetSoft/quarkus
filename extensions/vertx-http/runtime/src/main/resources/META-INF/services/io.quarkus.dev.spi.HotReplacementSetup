@@ -1,2 +1,3 @@
 io.quarkus.vertx.http.runtime.devmode.VertxHttpHotReplacementSetup
 io.quarkus.vertx.http.runtime.devmode.StaticResourcesHotReplacementSetup
+io.quarkus.vertx.http.runtime.devmode.BrowserLiveReloadHotReplacementSetup
