@@ -13,6 +13,8 @@ import org.jboss.logging.Logger;
 import org.testcontainers.mariadb.MariaDBContainer;
 import org.testcontainers.utility.DockerImageName;
 
+import com.github.dockerjava.api.command.InspectContainerResponse;
+
 import io.quarkus.datasource.common.runtime.DataSourceUtil;
 import io.quarkus.datasource.common.runtime.DatabaseKind;
 import io.quarkus.datasource.deployment.spi.DatasourceStartable;
@@ -102,6 +104,19 @@ public class MariaDBDevServicesProcessor {
     }
 
     private static class QuarkusMariaDBContainer extends MariaDBContainer implements DatasourceStartable {
+
+        @Override
+        protected void containerIsStarted(InspectContainerResponse containerInfo, boolean reused) {
+            if (reused) {
+                // The container is reused across restarts, so its data - including any init scripts already
+                // applied to it - is preserved. Re-running the init scripts would fail for non-idempotent
+                // scripts, so they are skipped. See https://github.com/quarkusio/quarkus/issues/36987
+                logger().info("Reusing existing container, not running the datasource Dev Service init scripts again");
+            } else {
+                super.containerIsStarted(containerInfo, reused);
+            }
+        }
+
         private final OptionalInt fixedExposedPort;
         private final boolean useSharedNetwork;
 
