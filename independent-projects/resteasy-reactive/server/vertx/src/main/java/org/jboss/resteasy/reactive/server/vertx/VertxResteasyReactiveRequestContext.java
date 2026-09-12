@@ -97,7 +97,11 @@ public class VertxResteasyReactiveRequestContext extends ResteasyReactiveRequest
                 });
             }
         };
-        request.pause();
+        // an HTTP/2 request that has already been fully read (for example by a preceding body handler)
+        // throws on pause(), whereas HTTP/1 silently ignores it
+        if (!request.isEnded()) {
+            request.pause();
+        }
     }
 
     @Override
@@ -305,7 +309,9 @@ public class VertxResteasyReactiveRequestContext extends ResteasyReactiveRequest
 
     @Override
     public ServerHttpResponse pauseRequestInput() {
-        request.pause();
+        if (!request.isEnded()) {
+            request.pause();
+        }
         return this;
     }
 
@@ -315,7 +321,9 @@ public class VertxResteasyReactiveRequestContext extends ResteasyReactiveRequest
             continueState = ContinueState.SENT;
             response.writeContinue();
         }
-        request.resume();
+        if (!request.isEnded()) {
+            request.resume();
+        }
         return this;
     }
 
