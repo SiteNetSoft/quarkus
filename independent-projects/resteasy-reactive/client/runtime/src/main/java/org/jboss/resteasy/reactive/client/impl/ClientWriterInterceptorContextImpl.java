@@ -79,7 +79,7 @@ public class ClientWriterInterceptorContextImpl extends AbstractClientIntercepto
             }
 
             outputStream.close();
-            result = Buffer.buffer(baos.toByteArray());
+            // the result is only captured in getResult(), after the outer interceptors have finished writing
             done = true;
         } else {
             interceptors[index++].aroundWriteTo(this);
@@ -113,6 +113,11 @@ public class ClientWriterInterceptorContextImpl extends AbstractClientIntercepto
     }
 
     public Buffer getResult() {
+        if (result == null && done) {
+            // interceptors may write to the original stream after proceed() returns, so only
+            // take the snapshot once the whole chain has completed
+            result = Buffer.buffer(baos.toByteArray());
+        }
         return result;
     }
 
