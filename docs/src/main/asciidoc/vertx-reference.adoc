@@ -1092,5 +1092,5 @@ Here is the list of available brotli4j artifacts for the different platforms:
 * `native-linux-riscv64`
 * `native-windows-x86_64`
 * `native-windows-aarch64`
-* `native-macos-x86_64`
-* `native-macos-aarch64`
+* `native-osx-x86_64`
+* `native-osx-aarch64`
