@@ -5,6 +5,7 @@ import java.net.SocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Consumer;
 
 import org.apache.hc.client5.http.auth.AuthScope;
@@ -47,6 +48,8 @@ public final class RestClientBuilderHelper {
     }
 
     public static Rest5ClientBuilder createRestClientBuilder(ElasticsearchConfig config) {
+        validate(config);
+
         List<HttpHost> hosts = new ArrayList<>(config.hosts().size());
         for (InetSocketAddress host : config.hosts()) {
             hosts.add(new HttpHost(config.protocol(), host.getHostString(), host.getPort()));
@@ -122,6 +125,27 @@ public final class RestClientBuilderHelper {
         }
 
         return builder.build();
+    }
+
+    /**
+     * The HTTP client treats a non-positive connection limit as "not set" and silently falls back to its own
+     * defaults, and a non-positive I/O thread count either yields a client that never processes requests or fails
+     * with an obscure exception, so these values are rejected upfront.
+     */
+    private static void validate(ElasticsearchConfig config) {
+        requirePositive("quarkus.elasticsearch.max-connections", config.maxConnections());
+        requirePositive("quarkus.elasticsearch.max-connections-per-route", config.maxConnectionsPerRoute());
+        if (config.ioThreadCounts().isPresent()) {
+            requirePositive("quarkus.elasticsearch.io-thread-counts", config.ioThreadCounts().get());
+        }
+    }
+
+    private static void requirePositive(String property, int value) {
+        if (value <= 0) {
+            throw new ConfigurationException(
+                    "The value of '" + property + "' must be strictly positive, but it is " + value,
+                    Set.of(property));
+        }
     }
 
     private static void applyAuthentication(HttpAsyncClientBuilder httpClientBuilder, ElasticsearchConfig config) {

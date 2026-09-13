@@ -57,12 +57,14 @@ public interface ElasticsearchConfig {
 
     /**
      * The maximum number of connections to all the Elasticsearch servers.
+     * Must be strictly positive.
      */
     @WithDefault("40")
     int maxConnections();
 
     /**
      * The maximum number of connections per Elasticsearch server.
+     * Must be strictly positive.
      */
     @WithDefault("20")
     int maxConnectionsPerRoute();
@@ -70,6 +72,7 @@ public interface ElasticsearchConfig {
     /**
      * The number of IO thread.
      * By default, this is the number of locally detected processors.
+     * When set, it must be strictly positive.
      * <p>
      * Thread counts higher than the number of processors should not be necessary because the I/O threads rely on non-blocking
      * operations, but you may want to use a thread count lower than the number of processors.
