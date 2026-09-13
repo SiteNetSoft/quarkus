@@ -24,6 +24,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import io.quarkus.cache.CacheResult;
 import io.quarkus.test.QuarkusExtensionTest;
 import io.smallrye.mutiny.Uni;
+import io.smallrye.mutiny.infrastructure.Infrastructure;
 import io.vertx.core.impl.NoStackTraceException;
 
 public class UniReturnTypeWithFailureTest {
@@ -90,6 +91,28 @@ public class UniReturnTypeWithFailureTest {
 
         assertEquals(2, failureCachingService.getInvocations(key),
                 "Timeout failures should not be cached - method should be invoked again (issue #39677)");
+    }
+
+    /**
+     * Reproducer for #56148: a failure emitted asynchronously (from another thread) stays in the cache for the next
+     * call, because the subscriber is notified before Caffeine removes the failed future.
+     */
+    @Test
+    void testAsyncFailureCaching() {
+        for (int i = 0; i < 50; i++) {
+            String key = "async-failure-test-key-" + i;
+            failureCachingService.resetCounter(key);
+
+            NoStackTraceException first = assertThrows(NoStackTraceException.class,
+                    () -> failureCachingService.getUsernameByIdAsyncFailure(key).await().indefinitely());
+            assertEquals(1, failureCachingService.getInvocations(key));
+
+            NoStackTraceException second = assertThrows(NoStackTraceException.class,
+                    () -> failureCachingService.getUsernameByIdAsyncFailure(key).await().indefinitely());
+            assertEquals(2, failureCachingService.getInvocations(key),
+                    "Asynchronous failures should not be cached - method should be invoked again (issue #56148)");
+            assertEquals("failure 2", second.getMessage(), "The second call got the first failure back: " + first.getMessage());
+        }
     }
 
     @Test
@@ -230,6 +253,16 @@ public class UniReturnTypeWithFailureTest {
             AtomicInteger counter = counters.computeIfAbsent(userId, k -> new AtomicInteger(0));
             counter.incrementAndGet();
             return Uni.createFrom().failure(new NoStackTraceException("Error when getUsername"));
+        }
+
+        @CacheResult(cacheName = "async-failure-cache")
+        public Uni<String> getUsernameByIdAsyncFailure(String userId) {
+            AtomicInteger counter = counters.computeIfAbsent(userId, k -> new AtomicInteger(0));
+            int invocationNumber = counter.incrementAndGet();
+            return Uni.createFrom().item("unused")
+                    .runSubscriptionOn(Infrastructure.getDefaultWorkerPool())
+                    .onItem().transformToUni(s -> Uni.createFrom()
+                            .failure(new NoStackTraceException("failure " + invocationNumber)));
         }
 
         @CacheResult(cacheName = "timeout-failure-cache")
