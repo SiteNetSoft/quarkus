@@ -287,6 +287,9 @@ public class QuteProcessor {
             message.append("\n");
             TemplateException exception = new TemplateException(message.toString());
             for (TemplateException error : errors) {
+                // the message and the origin carry all the information; the stack trace of an individual problem
+                // only points into the build steps and would be printed for every problem in the report
+                error.setStackTrace(new StackTraceElement[0]);
                 exception.addSuppressed(error);
             }
             throw exception;
