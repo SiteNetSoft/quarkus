@@ -10,10 +10,10 @@ import 'qwc-no-data';
 import { notifier } from 'notifier';
 import { msg, str, updateWhenLocaleChanges } from 'localization';
 
-const NODE_WIDTH = 210;
-const NODE_HEIGHT = 58;
-const COLUMN_GAP = 110;
-const ROW_GAP = 22;
+const NODE_WIDTH = 230;
+const NODE_HEIGHT = 92;
+const COLUMN_GAP = 120;
+const ROW_GAP = 26;
 const PADDING = 40;
 
 const LAYERS = ['entry', 'logic', 'data', 'integration', 'external'];
@@ -27,28 +27,36 @@ const LEVEL_PATHS = ['context', 'container', 'component', 'component'];
 const CONTAINER_KINDS = ['database', 'cache', 'message-broker'];
 const NETWORK_ENTRY_POINTS = ['rest-endpoint', 'route', 'websocket', 'graphql', 'grpc-service', 'function'];
 
-const KIND_COLORS = {
-    'rest-endpoint': '#4695eb',
-    'route': '#4695eb',
-    'websocket': '#3d85c6',
-    'grpc-service': '#3d85c6',
-    'graphql': '#3d85c6',
-    'function': '#3d85c6',
-    'scheduled': '#6fa8dc',
-    'messaging': '#e69138',
-    'bean': '#8e7cc3',
-    'repository': '#c27c0e',
-    'entity': '#b45f06',
-    'rest-client': '#6aa84f',
-    'websocket-client': '#6aa84f',
-    'database': '#a64d79',
-    'cache': '#a64d79',
-    'message-broker': '#cc4125',
-    'http-service': '#38761d',
-    'identity-provider': '#674ea7',
-    'service': '#7f7f7f',
-    'users': '#08427b',
-    'application': '#1168bd'
+// The colours of the C4 notation
+const C4 = {
+    person: { fill: '#08427b', text: '#ffffff', label: 'Person' },
+    system: { fill: '#1168bd', text: '#ffffff', label: 'Software system' },
+    container: { fill: '#438dd5', text: '#ffffff', label: 'Container' },
+    component: { fill: '#85bbf0', text: '#0b2545', label: 'Component' },
+    external: { fill: '#8a8a8a', text: '#ffffff', label: 'External system' }
+};
+
+const KIND_NAMES = {
+    'rest-endpoint': 'REST endpoint',
+    'route': 'Route',
+    'websocket': 'WebSocket endpoint',
+    'grpc-service': 'gRPC service',
+    'graphql': 'GraphQL API',
+    'function': 'Function',
+    'scheduled': 'Scheduled job',
+    'messaging': 'Messaging',
+    'bean': 'Bean',
+    'repository': 'Repository',
+    'entity': 'Entity',
+    'rest-client': 'REST client',
+    'websocket-client': 'WebSocket client',
+    'database': 'Database',
+    'cache': 'Cache',
+    'message-broker': 'Message broker',
+    'http-service': 'HTTP service',
+    'grpc-service-ext': 'gRPC service',
+    'identity-provider': 'Identity provider',
+    'service': 'Service'
 };
 
 const EDGE_STYLES = {
@@ -108,30 +116,41 @@ export class QwcArchitecture extends QwcHotReloadElement {
         .node {
             cursor: pointer;
         }
-        .node-body {
-            fill: var(--lumo-base-color);
-            stroke: var(--lumo-contrast-30pct);
+        .node .shape {
+            filter: url(#shadow);
+            transition: filter 0.15s;
         }
-        .node.selected .node-body {
-            stroke: var(--quarkus-blue, #4695eb);
-            stroke-width: 2.5;
+        .node:hover .shape {
+            filter: url(#shadow-hover);
+        }
+        .node.selected .outline {
+            stroke: #ff9800;
+            stroke-width: 3;
         }
         .node-name {
-            fill: var(--lumo-body-text-color);
-            font-size: 13px;
-            font-weight: 600;
+            font-size: 14px;
+            font-weight: 700;
         }
-        .node-meta {
-            fill: var(--lumo-secondary-text-color);
+        .node-type {
             font-size: 11px;
+            opacity: 0.85;
+        }
+        .node-text {
+            font-size: 11.5px;
+            opacity: 0.95;
         }
         .badge {
-            fill: var(--lumo-success-color-10pct, rgba(0, 160, 0, 0.12));
+            fill: #ffffff;
+            opacity: 0.92;
         }
         .badge-text {
-            fill: var(--lumo-success-text-color, #2f7d32);
-            font-size: 9px;
-            font-weight: 600;
+            fill: #1b7f3b;
+            font-size: 8.5px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+        }
+        .band {
+            fill: var(--lumo-contrast-5pct);
         }
         .faded {
             opacity: 0.15;
@@ -141,14 +160,15 @@ export class QwcArchitecture extends QwcHotReloadElement {
             stroke: var(--lumo-contrast-50pct);
         }
         .edge.highlight {
-            stroke: var(--quarkus-blue, #4695eb);
+            stroke: #ff9800;
+        }
+        .edge-pill {
+            fill: var(--lumo-base-color);
+            stroke: var(--lumo-contrast-20pct);
         }
         .edge-label {
-            fill: var(--lumo-secondary-text-color);
-            font-size: 10px;
-            paint-order: stroke;
-            stroke: var(--lumo-base-color);
-            stroke-width: 3px;
+            fill: var(--lumo-body-text-color);
+            font-size: 10.5px;
         }
         .layer-title {
             fill: var(--lumo-secondary-text-color);
@@ -455,13 +475,20 @@ export class QwcArchitecture extends QwcHotReloadElement {
                         <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--lumo-contrast-50pct)"></path>
                     </marker>
                     <marker id="arrow-highlight" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                        <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--quarkus-blue, #4695eb)"></path>
+                        <path d="M 0 0 L 10 5 L 0 10 z" fill="#ff9800"></path>
                     </marker>
+                    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+                        <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#000000" flood-opacity="0.18"></feDropShadow>
+                    </filter>
+                    <filter id="shadow-hover" x="-10%" y="-10%" width="120%" height="140%">
+                        <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.28"></feDropShadow>
+                    </filter>
                 </defs>
                 <g transform="translate(${x} ${y}) scale(${scale})">
                     ${layout.boundary ? svg`
                         <rect class="boundary" x="${layout.boundary.x}" y="${layout.boundary.y}" width="${layout.boundary.width}" height="${layout.boundary.height}" rx="14"></rect>
                         <text class="boundary-title" x="${layout.boundary.x + 14}" y="${layout.boundary.y + 20}">${layout.boundary.title}</text>` : nothing}
+                    ${(layout.bands || []).map(b => svg`<rect class="band" x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="12"></rect>`)}
                     ${layout.titles.map(t => svg`<text class="layer-title" x="${t.x}" y="${t.y}" text-anchor="middle">${t.text}</text>`)}
                     ${layout.edges.map(e => this._renderEdge(e, layout, focus))}
                     ${layout.nodes.map(n => this._renderNode(n, focus))}
@@ -470,24 +497,96 @@ export class QwcArchitecture extends QwcHotReloadElement {
     }
 
     _renderNode(node, focus) {
-        const color = KIND_COLORS[node.kind] || '#7f7f7f';
         const faded = focus && !focus.has(node.id);
         const selected = this._selected === node.id;
-        const height = node.height || NODE_HEIGHT;
+        const w = node.width || NODE_WIDTH;
+        const h = node.height || NODE_HEIGHT;
+        const style = node.style || C4.component;
+        const top = node.textTop || 0;
+        const cx = w / 2;
+        const lines = node.lines || [];
         return svg`
             <g class="node ${faded ? 'faded' : ''} ${selected ? 'selected' : ''}" transform="translate(${node.x} ${node.y})"
                @click=${(e) => this._select(e, node.id)}
                @dblclick=${(e) => this._zoomInto(e, node)}>
                 <title>${node.title || node.name}</title>
-                <rect class="node-body" width="${node.width || NODE_WIDTH}" height="${height}" rx="8"></rect>
-                <rect width="6" height="${height}" rx="3" fill="${color}"></rect>
-                <text class="node-name" x="16" y="23">${this._truncate(node.name, node.width ? 40 : 24)}</text>
-                ${node.lines ? node.lines.map((line, i) => svg`<text class="node-meta" x="16" y="${46 + i * 18}">${line}</text>`)
-                    : svg`<text class="node-meta" x="16" y="42">${this._truncate(node.meta, node.width ? 52 : 30)}</text>`}
+                <g class="shape">${this._shape(node.shape, w, h, style.fill)}</g>
+                ${this._shape(node.shape, w, h, 'none', 'outline')}
+                <g fill="${style.text}">
+                    <text class="node-name" x="${cx}" y="${top + 26}" text-anchor="middle">${this._truncate(node.name, Math.floor(w / 8.5))}</text>
+                    <text class="node-type" x="${cx}" y="${top + 44}" text-anchor="middle">${this._truncate(node.type, Math.floor(w / 6.2))}</text>
+                    ${lines.map((line, i) => svg`<text class="node-text" x="${cx}" y="${top + 64 + i * 16}" text-anchor="middle">${this._truncate(line, Math.floor(w / 6.4))}</text>`)}
+                </g>
                 ${node.devService ? svg`
-                    <rect class="badge" x="${(node.width || NODE_WIDTH) - 72}" y="6" width="64" height="15" rx="7"></rect>
-                    <text class="badge-text" x="${(node.width || NODE_WIDTH) - 40}" y="16.5" text-anchor="middle">DEV SERVICE</text>` : nothing}
+                    <rect class="badge" x="${cx - 35}" y="${h - 22}" width="70" height="14" rx="7"></rect>
+                    <text class="badge-text" x="${cx}" y="${h - 12}" text-anchor="middle">DEV SERVICE</text>` : nothing}
             </g>`;
+    }
+
+    /**
+     * Draws a C4 shape: a box, a person, a database cylinder or a message queue pipe.
+     */
+    _shape(shape, w, h, fill, cls = '') {
+        const stroke = cls ? 'transparent' : 'rgba(0, 0, 0, 0.12)';
+        switch (shape) {
+            case 'person': {
+                const r = 20;
+                return svg`<circle class="${cls}" cx="${w / 2}" cy="${r}" r="${r}" fill="${fill}" stroke="${stroke}"></circle>
+                    <rect class="${cls}" x="0" y="${2 * r - 6}" width="${w}" height="${h - 2 * r + 6}" rx="22" fill="${fill}" stroke="${stroke}"></rect>`;
+            }
+            case 'database': {
+                const e = 10;
+                return svg`<path class="${cls}" d="M 0 ${e} A ${w / 2} ${e} 0 0 1 ${w} ${e} L ${w} ${h - e} A ${w / 2} ${e} 0 0 1 0 ${h - e} Z" fill="${fill}" stroke="${stroke}"></path>
+                    <path class="${cls}" d="M 0 ${e} A ${w / 2} ${e} 0 0 0 ${w} ${e}" fill="none" stroke="${cls ? 'transparent' : 'rgba(255, 255, 255, 0.5)'}"></path>`;
+            }
+            case 'queue': {
+                const e = 12;
+                return svg`<path class="${cls}" d="M ${e} 0 L ${w - e} 0 A ${e} ${h / 2} 0 0 1 ${w - e} ${h} L ${e} ${h} A ${e} ${h / 2} 0 0 1 ${e} 0 Z" fill="${fill}" stroke="${stroke}"></path>
+                    <path class="${cls}" d="M ${w - e} 0 A ${e} ${h / 2} 0 0 0 ${w - e} ${h}" fill="none" stroke="${cls ? 'transparent' : 'rgba(255, 255, 255, 0.5)'}"></path>`;
+            }
+            default:
+                return svg`<rect class="${cls}" width="${w}" height="${h}" rx="10" fill="${fill}" stroke="${stroke}"></rect>`;
+        }
+    }
+
+    /**
+     * Gives a laid out node its C4 shape, colours and text, from the model and the current level.
+     */
+    _decorate(node) {
+        const model = this._model.nodes.find(n => n.id === node.id);
+        const level = this._level;
+        if (node.id === '__users') {
+            Object.assign(node, { shape: 'person', style: C4.person, type: '[Person]', lines: [node.meta], textTop: 34 });
+            node.height = node.height || NODE_HEIGHT + 34;
+            node.y -= 17;
+        } else if (node.id === 'app') {
+            node.style = level === LEVEL_CONTEXT ? C4.system : C4.container;
+            node.type = level === LEVEL_CONTEXT ? '[Software system]'
+                : `[Container: Quarkus${this._model.quarkusVersion ? ' ' + this._model.quarkusVersion : ''}]`;
+        } else if (model && model.layer === 'external') {
+            const container = CONTAINER_KINDS.includes(model.kind);
+            node.shape = model.kind === 'message-broker' ? 'queue' : (model.kind === 'database' || model.kind === 'cache') ? 'database' : 'box';
+            node.style = container ? C4.container : C4.external;
+            node.type = container ? `[Container: ${model.technology}]` : this._typeOf(KIND_NAMES[model.kind] || 'Software system', model.technology);
+            node.lines = node.lines || this._descriptionOf(model, 1);
+            if (node.shape === 'database') {
+                node.textTop = 6;
+            }
+        } else if (model) {
+            node.style = C4.component;
+            node.type = this._typeOf(KIND_NAMES[model.kind] || model.kind, model.technology);
+            node.lines = node.lines || this._descriptionOf(model, 2);
+        }
+        return node;
+    }
+
+    _typeOf(kind, technology) {
+        return !technology || kind.toLowerCase() === technology.toLowerCase() ? `[${kind}]` : `[${kind}: ${technology}]`;
+    }
+
+    _descriptionOf(model, count) {
+        const details = (model.details || []).filter(d => !d.startsWith('Dev Service:'));
+        return details.slice(0, count);
     }
 
     _renderEdge(edge, layout, focus) {
@@ -508,9 +607,14 @@ export class QwcArchitecture extends QwcHotReloadElement {
                       marker-end="url(#${highlight ? 'arrow-highlight' : 'arrow'})">
                     <title>${label}</title>
                 </path>
-                ${(highlight || layout.showLabels) && edge.label ? svg`
-                    <text class="edge-label" x="${path.mx}" y="${path.my - 4}" text-anchor="middle">${this._truncate(edge.label, 28)}</text>` : nothing}
+                ${(highlight || layout.showLabels) && edge.label ? this._renderEdgeLabel(this._truncate(edge.label, 34), path.mx, path.my) : nothing}
             </g>`;
+    }
+
+    _renderEdgeLabel(text, x, y) {
+        const width = text.length * 5.9 + 14;
+        return svg`<rect class="edge-pill" x="${x - width / 2}" y="${y - 9}" width="${width}" height="18" rx="9"></rect>
+            <text class="edge-label" x="${x}" y="${y + 3.5}" text-anchor="middle">${text}</text>`;
     }
 
     _edgePath(source, target, offset) {
@@ -554,9 +658,9 @@ export class QwcArchitecture extends QwcHotReloadElement {
     }
 
     _renderLegend() {
-        const kinds = [...new Set(this._layout.nodes.map(n => n.kind))];
+        const styles = [...new Set(this._layout.nodes.map(n => n.style).filter(s => s))];
         return html`<div class="legend">
-            ${kinds.map(k => html`<span><span class="swatch" style="background:${KIND_COLORS[k] || '#7f7f7f'}"></span>${k}</span>`)}
+            ${styles.map(s => html`<span><span class="swatch" style="background:${s.fill}"></span>${s.label}</span>`)}
         </div>`;
     }
 
@@ -674,12 +778,9 @@ export class QwcArchitecture extends QwcHotReloadElement {
         }
         const lines = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
             .map(([kind, count]) => `${count} × ${kind}`);
-        if (level === LEVEL_CONTAINER && model.quarkusVersion) {
-            lines.unshift(`[Quarkus ${model.quarkusVersion}]`);
-        }
         const columnHeight = count => count * (NODE_HEIGHT + ROW_GAP) - ROW_GAP;
         const appWidth = 260;
-        const appHeight = Math.max(120, 60 + lines.length * 18, columnHeight(containers.length),
+        const appHeight = Math.max(140, 76 + lines.length * 16, columnHeight(containers.length),
             columnHeight(externals.length));
         const top = PADDING + 30;
         const centered = count => top + (appHeight - Math.max(0, columnHeight(count))) / 2;
@@ -752,7 +853,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
 
         const lines = [focus.className || focus.technology, ...(focus.details || [])];
         const focusWidth = 340;
-        const focusHeight = Math.max(NODE_HEIGHT, 60 + lines.length * 18);
+        const focusHeight = Math.max(NODE_HEIGHT, 76 + lines.length * 16);
         const columnHeight = count => count * (NODE_HEIGHT + ROW_GAP) - ROW_GAP;
         const height = Math.max(focusHeight, columnHeight(users.length), columnHeight(dependencies.length));
         const top = PADDING + 30;
@@ -824,10 +925,12 @@ export class QwcArchitecture extends QwcHotReloadElement {
         const tallest = Math.max(...columns.map(c => c.length));
         const nodes = [];
         const titles = [];
+        const bands = [];
         columns.forEach((column, ci) => {
             const x = PADDING + ci * (NODE_WIDTH + COLUMN_GAP);
             const offset = (tallest - column.length) * (NODE_HEIGHT + ROW_GAP) / 2;
-            titles.push({ x: x + NODE_WIDTH / 2, y: PADDING + 8, text: this._layerTitle(column[0].layer) });
+            titles.push({ x: x + NODE_WIDTH / 2, y: PADDING + 16, text: this._layerTitle(column[0].layer) });
+            bands.push({ x: x - 14, y: PADDING, width: NODE_WIDTH + 28, height: tallest * (NODE_HEIGHT + ROW_GAP) + 40 });
             column.forEach((node, ri) => {
                 nodes.push({
                     id: node.id, name: node.name, kind: node.kind, devService: node.devService,
@@ -836,7 +939,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     matches: !filter || node.name.toLowerCase().includes(filter)
                         || (node.className || '').toLowerCase().includes(filter)
                         || (node.details || []).some(d => d.toLowerCase().includes(filter)),
-                    x, y: PADDING + 24 + offset + ri * (NODE_HEIGHT + ROW_GAP)
+                    x, y: PADDING + 32 + offset + ri * (NODE_HEIGHT + ROW_GAP)
                 });
             });
         });
@@ -845,21 +948,23 @@ export class QwcArchitecture extends QwcHotReloadElement {
         const inside = nodes.filter(n => model.nodes.find(m => m.id === n.id).layer !== 'external');
         let boundary = null;
         if (inside.length > 0) {
-            const minX = Math.min(...inside.map(n => n.x)) - 20;
-            const maxX = Math.max(...inside.map(n => n.x)) + NODE_WIDTH + 20;
+            const minX = Math.min(...inside.map(n => n.x)) - 30;
+            const maxX = Math.max(...inside.map(n => n.x)) + NODE_WIDTH + 30;
             boundary = {
-                x: minX, y: PADDING - 16, width: maxX - minX,
-                height: tallest * (NODE_HEIGHT + ROW_GAP) + 56, title: model.application
+                x: minX, y: PADDING - 34, width: maxX - minX,
+                height: tallest * (NODE_HEIGHT + ROW_GAP) + 92,
+                title: `${model.application} [Container: Quarkus${model.quarkusVersion ? ' ' + model.quarkusVersion : ''}]`
             };
         }
-        return this._finishLayout(nodes, edges, titles, boundary, false);
+        return this._finishLayout(nodes, edges, titles, boundary, false, bands);
     }
 
-    _finishLayout(nodes, edges, titles, boundary, showLabels) {
+    _finishLayout(nodes, edges, titles, boundary, showLabels, bands) {
+        nodes.forEach(n => this._decorate(n));
         const byId = new Map(nodes.map(n => [n.id, n]));
         const width = Math.max(...nodes.map(n => n.x + (n.width || NODE_WIDTH))) + PADDING;
         const height = Math.max(...nodes.map(n => n.y + (n.height || NODE_HEIGHT)), boundary ? boundary.y + boundary.height : 0) + PADDING;
-        return { nodes, edges, titles, boundary, byId, width, height, showLabels };
+        return { nodes, edges, titles, boundary, byId, width, height, showLabels, bands };
     }
 
     _layerTitle(layer) {
@@ -967,12 +1072,14 @@ export class QwcArchitecture extends QwcHotReloadElement {
         if (!canvas || !this._layout || canvas.clientWidth === 0) {
             return;
         }
+        const reserved = 56;
+        const available = canvas.clientHeight - reserved;
         const scale = Math.min(1.2, Math.max(0.15, Math.min(canvas.clientWidth / this._layout.width,
-            canvas.clientHeight / this._layout.height)));
+            available / this._layout.height)));
         this._view = {
             scale,
             x: (canvas.clientWidth - this._layout.width * scale) / 2,
-            y: Math.max(0, (canvas.clientHeight - this._layout.height * scale) / 2)
+            y: reserved + Math.max(0, (available - this._layout.height * scale) / 2)
         };
     }
 
@@ -1036,7 +1143,8 @@ export class QwcArchitecture extends QwcHotReloadElement {
         const computed = getComputedStyle(this);
         let cssText = QwcArchitecture.styles.cssText;
         for (const variable of ['--lumo-base-color', '--lumo-body-text-color', '--lumo-secondary-text-color',
-            '--lumo-contrast-10pct', '--lumo-contrast-30pct', '--lumo-contrast-50pct', '--quarkus-blue',
+            '--lumo-contrast-5pct', '--lumo-contrast-10pct', '--lumo-contrast-20pct', '--lumo-contrast-30pct',
+            '--lumo-contrast-50pct', '--quarkus-blue',
             '--lumo-success-color-10pct', '--lumo-success-text-color']) {
             const value = computed.getPropertyValue(variable).trim();
             if (value) {
