@@ -12,6 +12,7 @@ export const templates = {
     'menu-build_metrics': 'Build Metrics',
     'menu-readme': 'Readme',
     'menu-dependencies': 'Dependencies',
+    'menu-architecture': 'Architecture',
     'menu-remove-context-item': 'Remove',
     
     // Settings dialog
@@ -320,6 +321,33 @@ export const templates = {
     'buildmetrics-count': 'Count',
     
     // Dependencies (Menu)
+    // Architecture
+    'architecture-empty': 'No components found in this application.',
+    'architecture-lens-system': 'System',
+    'architecture-lens-components': 'Components',
+    'architecture-search': 'Search',
+    'architecture-layer-entry': 'Entry points',
+    'architecture-layer-logic': 'Logic',
+    'architecture-layer-data': 'Data',
+    'architecture-layer-integration': 'Integration',
+    'architecture-layer-external': 'External',
+    'architecture-zoom-in': 'Zoom in',
+    'architecture-zoom-out': 'Zoom out',
+    'architecture-fit': 'Fit to screen',
+    'architecture-details': 'Details',
+    'architecture-depends-on': 'Depends on',
+    'architecture-used-by': 'Used by',
+    'architecture-show-components': 'Show the components',
+    'architecture-users': 'Users and clients',
+    'architecture-application': 'Application',
+    'architecture-external-systems': 'External systems',
+    'architecture-copied': str`${0} diagram copied to the clipboard`,
+    'architecture-copy-failed': 'Could not copy to the clipboard',
+    'architecture-copy-plantuml': 'Copy as PlantUML',
+    'architecture-copy-mermaid': 'Copy as Mermaid',
+    'architecture-download-svg': 'Download as SVG',
+    'architecture-open-json': 'Open the JSON model',
+
     'dependencies-show-path-to': 'Show path to...',
     'dependencies-simple-description': 'Simple description',
     'dependencies-direct-only': 'Direct Only'
