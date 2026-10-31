@@ -2,7 +2,6 @@ import { QwcHotReloadElement, html, css, svg, nothing } from 'qwc-hot-reload-ele
 import { architecture, architecturePlantUml, architectureMermaid, architecturePath } from 'devui-data';
 import '@vaadin/button';
 import '@vaadin/icon';
-import '@vaadin/tabs';
 import '@vaadin/text-field';
 import '@vaadin/checkbox';
 import '@vaadin/checkbox-group';
@@ -18,6 +17,15 @@ const ROW_GAP = 22;
 const PADDING = 40;
 
 const LAYERS = ['entry', 'logic', 'data', 'integration', 'external'];
+
+// The C4 levels, from the outside in
+const LEVEL_CONTEXT = 0;
+const LEVEL_CONTAINER = 1;
+const LEVEL_COMPONENT = 2;
+const LEVEL_CODE = 3;
+const LEVEL_PATHS = ['context', 'container', 'component', 'component'];
+const CONTAINER_KINDS = ['database', 'cache', 'message-broker'];
+const NETWORK_ENTRY_POINTS = ['rest-endpoint', 'route', 'websocket', 'graphql', 'grpc-service', 'function'];
 
 const KIND_COLORS = {
     'rest-endpoint': '#4695eb',
@@ -39,8 +47,8 @@ const KIND_COLORS = {
     'http-service': '#38761d',
     'identity-provider': '#674ea7',
     'service': '#7f7f7f',
-    'users': '#4695eb',
-    'application': '#4695eb'
+    'users': '#08427b',
+    'application': '#1168bd'
 };
 
 const EDGE_STYLES = {
@@ -212,6 +220,32 @@ export class QwcArchitecture extends QwcHotReloadElement {
             border-radius: 6px;
             padding: 0 4px;
         }
+        .breadcrumb {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: var(--lumo-font-size-m);
+            padding: 8px 0;
+        }
+        .breadcrumb .crumb {
+            cursor: pointer;
+            color: var(--quarkus-blue, #4695eb);
+        }
+        .breadcrumb .crumb.current {
+            cursor: default;
+            color: var(--lumo-body-text-color);
+            font-weight: 600;
+        }
+        .breadcrumb .separator {
+            color: var(--lumo-secondary-text-color);
+        }
+        .hint {
+            position: absolute;
+            left: 12px;
+            top: 10px;
+            font-size: var(--lumo-font-size-xs);
+            color: var(--lumo-secondary-text-color);
+        }
         .legend {
             position: absolute;
             left: 12px;
@@ -241,7 +275,8 @@ export class QwcArchitecture extends QwcHotReloadElement {
 
     static properties = {
         _model: { state: true },
-        _lens: { state: true },
+        _level: { state: true },
+        _focus: { state: true },
         _filter: { state: true },
         _layers: { state: true },
         _selected: { state: true },
@@ -253,7 +288,8 @@ export class QwcArchitecture extends QwcHotReloadElement {
         super();
         updateWhenLocaleChanges(this);
         this._model = architecture;
-        this._lens = 0;
+        this._level = LEVEL_CONTEXT;
+        this._focus = null;
         this._filter = '';
         this._layers = [...LAYERS];
         this._selected = null;
@@ -297,7 +333,20 @@ export class QwcArchitecture extends QwcHotReloadElement {
         if (!this._model || !this._model.nodes || this._model.nodes.length === 0) {
             return html`<qwc-no-data message="${msg('No components found in this application.', { id: 'architecture-empty' })}"></qwc-no-data>`;
         }
-        this._layout = this._lens === 0 ? this._systemLayout() : this._componentLayout();
+        if (this._level === LEVEL_CODE && !this._model.nodes.some(n => n.id === this._focus)) {
+            this._level = LEVEL_COMPONENT;
+        }
+        switch (this._level) {
+            case LEVEL_CONTEXT:
+            case LEVEL_CONTAINER:
+                this._layout = this._applicationLayout(this._level);
+                break;
+            case LEVEL_COMPONENT:
+                this._layout = this._componentLayout();
+                break;
+            default:
+                this._layout = this._codeLayout(this._focus);
+        }
         return html`
             ${this._renderToolbar()}
             <div class="main">
@@ -308,6 +357,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
                      @pointerup=${this._onPointerUp}
                      @pointerleave=${this._onPointerUp}>
                     ${this._renderDiagram()}
+                    ${this._renderHint()}
                     ${this._renderControls()}
                     ${this._renderLegend()}
                 </div>
@@ -318,11 +368,8 @@ export class QwcArchitecture extends QwcHotReloadElement {
     _renderToolbar() {
         return html`
             <div class="toolbar">
-                <vaadin-tabs selected="${this._lens}" @selected-changed=${this._onLensChanged}>
-                    <vaadin-tab>${msg('System', { id: 'architecture-lens-system' })}</vaadin-tab>
-                    <vaadin-tab>${msg('Components', { id: 'architecture-lens-components' })}</vaadin-tab>
-                </vaadin-tabs>
-                ${this._lens === 1 ? html`
+                ${this._renderBreadcrumb()}
+                ${this._level === LEVEL_COMPONENT ? html`
                     <vaadin-text-field
                         placeholder="${msg('Search', { id: 'architecture-search' })}"
                         clear-button-visible
@@ -340,8 +387,39 @@ export class QwcArchitecture extends QwcHotReloadElement {
             </div>`;
     }
 
+    _renderBreadcrumb() {
+        const crumbs = [
+            msg('System context', { id: 'architecture-level-context' }),
+            msg('Containers', { id: 'architecture-level-container' }),
+            msg('Components', { id: 'architecture-level-component' })
+        ];
+        if (this._level === LEVEL_CODE) {
+            const focus = this._model.nodes.find(n => n.id === this._focus);
+            crumbs.push(focus ? focus.name : '');
+        }
+        return html`<div class="breadcrumb">
+            ${crumbs.map((crumb, i) => html`
+                ${i > 0 ? html`<span class="separator">›</span>` : nothing}
+                <span class="crumb ${i === this._level ? 'current' : ''}" @click=${() => this._goTo(i)}>${crumb}</span>`)}
+        </div>`;
+    }
+
+    _renderHint() {
+        const hints = [
+            msg('Double-click the system to see its containers', { id: 'architecture-hint-context' }),
+            msg('Double-click the application to see its components', { id: 'architecture-hint-container' }),
+            msg('Double-click a component to see its code', { id: 'architecture-hint-component' }),
+            msg('Double-click another component to move to it', { id: 'architecture-hint-code' })
+        ];
+        return html`<span class="hint">${hints[this._level]}</span>`;
+    }
+
     _renderControls() {
         return html`<div class="controls">
+                <vaadin-button theme="icon tertiary" title="${msg('Up one level', { id: 'architecture-level-up' })}"
+                    ?disabled=${this._level === LEVEL_CONTEXT} @click=${() => this._goTo(this._level - 1)}>
+                    <vaadin-icon icon="font-awesome-solid:arrow-turn-up"></vaadin-icon>
+                </vaadin-button>
                 <vaadin-button theme="icon tertiary" title="${msg('Zoom in', { id: 'architecture-zoom-in' })}" @click=${() => this._zoom(1.2)}>
                     <vaadin-icon icon="font-awesome-solid:magnifying-glass-plus"></vaadin-icon>
                 </vaadin-button>
@@ -351,10 +429,10 @@ export class QwcArchitecture extends QwcHotReloadElement {
                 <vaadin-button theme="icon tertiary" title="${msg('Fit to screen', { id: 'architecture-fit' })}" @click=${this._fit}>
                     <vaadin-icon icon="font-awesome-solid:expand"></vaadin-icon>
                 </vaadin-button>
-                <vaadin-button theme="tertiary small" title="${msg('Copy as PlantUML', { id: 'architecture-copy-plantuml' })}" @click=${() => this._copy(architecturePlantUml, 'PlantUML')}>
+                <vaadin-button theme="tertiary small" title="${msg('Copy as PlantUML', { id: 'architecture-copy-plantuml' })}" @click=${() => this._copy('plantuml', architecturePlantUml, 'PlantUML')}>
                     <vaadin-icon icon="font-awesome-solid:copy" slot="prefix"></vaadin-icon>PlantUML
                 </vaadin-button>
-                <vaadin-button theme="tertiary small" title="${msg('Copy as Mermaid', { id: 'architecture-copy-mermaid' })}" @click=${() => this._copy(architectureMermaid, 'Mermaid')}>
+                <vaadin-button theme="tertiary small" title="${msg('Copy as Mermaid', { id: 'architecture-copy-mermaid' })}" @click=${() => this._copy('mermaid', architectureMermaid, 'Mermaid')}>
                     <vaadin-icon icon="font-awesome-solid:copy" slot="prefix"></vaadin-icon>Mermaid
                 </vaadin-button>
                 <vaadin-button theme="icon tertiary" title="${msg('Download as SVG', { id: 'architecture-download-svg' })}" @click=${this._downloadSvg}>
@@ -398,7 +476,8 @@ export class QwcArchitecture extends QwcHotReloadElement {
         const height = node.height || NODE_HEIGHT;
         return svg`
             <g class="node ${faded ? 'faded' : ''} ${selected ? 'selected' : ''}" transform="translate(${node.x} ${node.y})"
-               @click=${(e) => this._select(e, node.id)}>
+               @click=${(e) => this._select(e, node.id)}
+               @dblclick=${(e) => this._zoomInto(e, node)}>
                 <title>${node.title || node.name}</title>
                 <rect class="node-body" width="${node.width || NODE_WIDTH}" height="${height}" rx="8"></rect>
                 <rect width="6" height="${height}" rx="3" fill="${color}"></rect>
@@ -502,6 +581,8 @@ export class QwcArchitecture extends QwcHotReloadElement {
             ${node.details && node.details.length ? html`
                 <span class="section">${msg('Details', { id: 'architecture-details' })}</span>
                 <ul>${node.details.map(d => html`<li>${d}</li>`)}</ul>` : nothing}
+            ${node.layer !== 'external' && this._focus !== node.id ? html`
+                <span class="link" @click=${() => this._zoomTo(node.id)}>${msg('Show its code', { id: 'architecture-show-code' })}</span>` : nothing}
             ${this._renderRelations(msg('Depends on', { id: 'architecture-depends-on' }), outgoing, 'target')}
             ${this._renderRelations(msg('Used by', { id: 'architecture-used-by' }), incoming, 'source')}
         </div>`;
@@ -523,8 +604,11 @@ export class QwcArchitecture extends QwcHotReloadElement {
             <span class="kind">${this._model.version}</span>
             <span class="section">${msg('Components', { id: 'architecture-lens-components' })}</span>
             <ul>${Object.entries(counts).map(([kind, count]) => html`<li>${count} × ${kind}</li>`)}</ul>
-            <span class="link" @click=${() => { this._lens = 1; this._selected = null; this._fitPending = true; }}>
-                ${msg('Show the components', { id: 'architecture-show-components' })}
+            ${this._model.quarkusVersion ? html`<span class="kind">Quarkus ${this._model.quarkusVersion}</span>` : nothing}
+            <span class="link" @click=${() => this._goTo(this._level + 1)}>
+                ${this._level === LEVEL_CONTEXT
+                    ? msg('Show the containers', { id: 'architecture-show-containers' })
+                    : msg('Show the components', { id: 'architecture-show-components' })}
             </span>
         </div>`;
     }
@@ -545,33 +629,42 @@ export class QwcArchitecture extends QwcHotReloadElement {
 
     // Layouts
 
-    _systemLayout() {
+    /**
+     * Lays out the context and container levels: the users on the left, the application in the middle, and the
+     * external systems on the right. At the container level, the data stores and brokers sit next to the
+     * application, inside the boundary of the software system.
+     */
+    _applicationLayout(level) {
         const model = this._model;
-        const externals = model.nodes.filter(n => n.layer === 'external');
+        const isContainer = n => n.layer === 'external' && CONTAINER_KINDS.includes(n.kind);
         const components = model.nodes.filter(n => n.layer !== 'external');
-        const componentIds = new Set(components.map(n => n.id));
-        const entryPoints = components.filter(n => n.layer === 'entry' && n.kind !== 'scheduled' && n.kind !== 'messaging');
+        const containers = level === LEVEL_CONTAINER ? model.nodes.filter(isContainer) : [];
+        const externals = model.nodes.filter(n => n.layer === 'external' && !isContainer(n));
+        const entryPoints = components.filter(n => NETWORK_ENTRY_POINTS.includes(n.kind));
+        const nodesById = new Map(model.nodes.map(n => [n.id, n]));
 
-        // Group the relations between the application and each external system
-        const relations = new Map();
-        for (const edge of model.edges) {
-            const fromApp = componentIds.has(edge.source) || edge.source === 'app';
-            const toApp = componentIds.has(edge.target);
-            let key = null, direction = null;
-            if (fromApp && !toApp) {
-                key = edge.target;
-                direction = 'out';
-            } else if (toApp && !componentIds.has(edge.source) && edge.source !== 'app') {
-                key = edge.source;
-                direction = 'in';
+        // Fold the components, and at the context level the containers, into the application
+        const fold = id => {
+            const node = nodesById.get(id);
+            if (!node) {
+                return id === 'app' ? 'app' : null;
             }
-            if (key) {
-                const relation = relations.get(key) || { out: [], in: [], outKind: edge.kind };
+            if (node.layer !== 'external' || (level === LEVEL_CONTEXT && isContainer(node))) {
+                return 'app';
+            }
+            return id;
+        };
+        const folded = new Map();
+        for (const edge of model.edges) {
+            const source = fold(edge.source), target = fold(edge.target);
+            if (source && target && source !== target) {
+                const key = `${source}\n${target}`;
+                const relation = folded.get(key) || { source, target, kind: edge.kind, labels: [] };
                 const label = edge.label ? `${edge.kind} ${edge.label}` : edge.kind;
-                if (!relation[direction].includes(label)) {
-                    relation[direction].push(label);
+                if (!relation.labels.includes(label)) {
+                    relation.labels.push(label);
                 }
-                relations.set(key, relation);
+                folded.set(key, relation);
             }
         }
 
@@ -581,50 +674,116 @@ export class QwcArchitecture extends QwcHotReloadElement {
         }
         const lines = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
             .map(([kind, count]) => `${count} × ${kind}`);
-        const externalsHeight = externals.length * (NODE_HEIGHT + ROW_GAP) - ROW_GAP;
-        const appHeight = Math.max(120, 60 + lines.length * 18, externalsHeight);
-        const externalsTop = PADDING + (appHeight - Math.max(0, externalsHeight)) / 2;
+        if (level === LEVEL_CONTAINER && model.quarkusVersion) {
+            lines.unshift(`[Quarkus ${model.quarkusVersion}]`);
+        }
+        const columnHeight = count => count * (NODE_HEIGHT + ROW_GAP) - ROW_GAP;
+        const appWidth = 260;
+        const appHeight = Math.max(120, 60 + lines.length * 18, columnHeight(containers.length),
+            columnHeight(externals.length));
+        const top = PADDING + 30;
+        const centered = count => top + (appHeight - Math.max(0, columnHeight(count))) / 2;
 
         const nodes = [];
-        const edges = [];
-        let x = PADDING;
         const titles = [];
+        let x = PADDING;
         if (entryPoints.length > 0) {
             nodes.push({
                 id: '__users', name: msg('Users and clients', { id: 'architecture-users' }), kind: 'users',
                 meta: entryPoints.map(n => n.technology).filter((v, i, a) => a.indexOf(v) === i).join(', '),
-                x, y: PADDING + appHeight / 2 - NODE_HEIGHT / 2
+                x, y: top + appHeight / 2 - NODE_HEIGHT / 2
             });
+            x += NODE_WIDTH + COLUMN_GAP;
+        }
+        const boundaryX = x - 24;
+        nodes.push({
+            id: 'app', name: model.application, kind: 'application', lines,
+            title: `${model.application} ${model.version}`, zoomable: true,
+            x, y: top, width: appWidth, height: appHeight
+        });
+        x += appWidth + COLUMN_GAP;
+        containers.forEach((node, i) => nodes.push(this._boxFor(node, x, centered(containers.length) + i * (NODE_HEIGHT + ROW_GAP))));
+        let boundary = null;
+        if (level === LEVEL_CONTAINER) {
+            const right = containers.length > 0 ? x + NODE_WIDTH + 24 : x - COLUMN_GAP + 24;
+            boundary = {
+                x: boundaryX, y: top - 44, width: right - boundaryX, height: appHeight + 68,
+                title: `${model.application} [${msg('Software system', { id: 'architecture-software-system' })}]`
+            };
+            x = right + COLUMN_GAP - 24;
+        }
+        externals.forEach((node, i) => nodes.push(this._boxFor(node, x, centered(externals.length) + i * (NODE_HEIGHT + ROW_GAP))));
+        if (externals.length > 0) {
+            titles.push({ x: x + NODE_WIDTH / 2, y: top - 16, text: msg('External systems', { id: 'architecture-external-systems' }) });
+        }
+
+        const edges = [];
+        if (entryPoints.length > 0) {
             edges.push({ source: '__users', target: 'app', kind: 'calls', label: 'HTTP' });
+        }
+        for (const relation of folded.values()) {
+            const reverse = folded.has(`${relation.target}\n${relation.source}`);
+            edges.push({
+                source: relation.source, target: relation.target, kind: relation.kind,
+                label: relation.labels.join(', '), offset: reverse ? (relation.source === 'app' ? -9 : 9) : 0
+            });
+        }
+        return this._finishLayout(nodes, edges, titles, boundary, true);
+    }
+
+    _boxFor(node, x, y) {
+        return {
+            id: node.id, name: node.name, kind: node.kind, devService: node.devService,
+            meta: node.technology, title: node.details && node.details.length ? node.details.join('\n') : node.name, x, y
+        };
+    }
+
+    /**
+     * Lays out the code level: one component in the middle with its details, the components that use it on the
+     * left, and the ones it depends on on the right.
+     */
+    _codeLayout(id) {
+        const model = this._model;
+        const focus = model.nodes.find(n => n.id === id);
+        const incoming = model.edges.filter(e => e.target === id && e.source !== id);
+        const outgoing = model.edges.filter(e => e.source === id && e.target !== id);
+        const users = [...new Set(incoming.map(e => e.source))].map(i => model.nodes.find(n => n.id === i)).filter(n => n);
+        const dependencies = [...new Set(outgoing.map(e => e.target))].map(i => model.nodes.find(n => n.id === i)).filter(n => n);
+
+        const lines = [focus.className || focus.technology, ...(focus.details || [])];
+        const focusWidth = 340;
+        const focusHeight = Math.max(NODE_HEIGHT, 60 + lines.length * 18);
+        const columnHeight = count => count * (NODE_HEIGHT + ROW_GAP) - ROW_GAP;
+        const height = Math.max(focusHeight, columnHeight(users.length), columnHeight(dependencies.length));
+        const top = PADDING + 30;
+        const centered = count => top + (height - Math.max(0, columnHeight(count))) / 2;
+
+        const nodes = [];
+        const titles = [];
+        let x = PADDING;
+        if (users.length > 0) {
+            titles.push({ x: x + NODE_WIDTH / 2, y: top - 16, text: msg('Used by', { id: 'architecture-used-by' }) });
+            users.forEach((node, i) => nodes.push(this._componentBox(node, x, centered(users.length) + i * (NODE_HEIGHT + ROW_GAP))));
             x += NODE_WIDTH + COLUMN_GAP;
         }
         nodes.push({
-            id: 'app', name: model.application, kind: 'application', lines,
-            title: `${model.application} ${model.version}`,
-            x, y: PADDING, width: 280, height: appHeight
+            id: focus.id, name: focus.name, kind: focus.kind, devService: focus.devService, lines,
+            title: focus.className || focus.name, x, y: top + (height - focusHeight) / 2, width: focusWidth, height: focusHeight
         });
-        x += 280 + COLUMN_GAP + 40;
-        externals.forEach((external, i) => {
-            nodes.push({
-                id: external.id, name: external.name, kind: external.kind, devService: external.devService,
-                meta: external.technology, x, y: externalsTop + i * (NODE_HEIGHT + ROW_GAP)
-            });
-            const relation = relations.get(external.id);
-            if (relation) {
-                const both = relation.out.length > 0 && relation.in.length > 0;
-                if (relation.out.length > 0) {
-                    edges.push({ source: 'app', target: external.id, kind: relation.outKind, label: relation.out.join(', '), offset: both ? -9 : 0 });
-                }
-                if (relation.in.length > 0) {
-                    edges.push({ source: external.id, target: 'app', kind: 'delivers', label: relation.in.join(', '), offset: both ? 9 : 0 });
-                }
-            }
-        });
-        titles.push({ x: PADDING + 140 + (entryPoints.length > 0 ? NODE_WIDTH + COLUMN_GAP : 0), y: PADDING - 12, text: msg('Application', { id: 'architecture-application' }) });
-        if (externals.length > 0) {
-            titles.push({ x: x + NODE_WIDTH / 2, y: PADDING - 12, text: msg('External systems', { id: 'architecture-external-systems' }) });
+        x += focusWidth + COLUMN_GAP;
+        if (dependencies.length > 0) {
+            titles.push({ x: x + NODE_WIDTH / 2, y: top - 16, text: msg('Depends on', { id: 'architecture-depends-on' }) });
+            dependencies.forEach((node, i) => nodes.push(this._componentBox(node, x, centered(dependencies.length) + i * (NODE_HEIGHT + ROW_GAP))));
         }
-        return this._finishLayout(nodes, edges, titles, null, true);
+        return this._finishLayout(nodes, [...incoming, ...outgoing], titles, null, true);
+    }
+
+    _componentBox(node, x, y) {
+        return {
+            id: node.id, name: node.name, kind: node.kind, devService: node.devService,
+            meta: node.details && node.details.length ? `${node.technology} · ${node.details[0]}` : node.technology,
+            title: node.className || node.name, x, y
+        };
     }
 
     _componentLayout() {
@@ -738,11 +897,36 @@ export class QwcArchitecture extends QwcHotReloadElement {
 
     // Interaction
 
-    _onLensChanged(e) {
-        if (this._lens !== e.detail.value) {
-            this._lens = e.detail.value;
-            this._selected = null;
-            this._fitPending = true;
+    _goTo(level) {
+        if (level < LEVEL_CONTEXT || level > LEVEL_CODE || level === this._level) {
+            return;
+        }
+        if (level === LEVEL_CODE && !this._focus) {
+            return;
+        }
+        this._level = level;
+        this._selected = null;
+        this._fitPending = true;
+    }
+
+    _zoomTo(id) {
+        this._focus = id;
+        this._level = LEVEL_CODE;
+        this._selected = null;
+        this._fitPending = true;
+    }
+
+    _zoomInto(e, node) {
+        e.stopPropagation();
+        if (this._level === LEVEL_CONTEXT && node.id === 'app') {
+            this._goTo(LEVEL_CONTAINER);
+        } else if (this._level === LEVEL_CONTAINER && node.id === 'app') {
+            this._goTo(LEVEL_COMPONENT);
+        } else if (this._level >= LEVEL_COMPONENT) {
+            const model = this._model.nodes.find(n => n.id === node.id);
+            if (model && model.layer !== 'external') {
+                this._zoomTo(node.id);
+            }
         }
     }
 
@@ -822,7 +1006,16 @@ export class QwcArchitecture extends QwcHotReloadElement {
 
     // Export
 
-    _copy(text, format) {
+    _copy(format, buildTimeTexts, title) {
+        const level = LEVEL_PATHS[this._level];
+        const fallback = buildTimeTexts && typeof buildTimeTexts === 'object' ? buildTimeTexts[level] : buildTimeTexts;
+        fetch(`${architecturePath}/${format}/${level}`)
+            .then(response => response.ok ? response.text() : fallback)
+            .catch(() => fallback)
+            .then(text => this._writeClipboard(text, title));
+    }
+
+    _writeClipboard(text, format) {
         navigator.clipboard.writeText(text).then(
             () => notifier.showInfoMessage(msg(str`${format} diagram copied to the clipboard`, { id: 'architecture-copied' })),
             () => notifier.showErrorMessage(msg('Could not copy to the clipboard', { id: 'architecture-copy-failed' })));

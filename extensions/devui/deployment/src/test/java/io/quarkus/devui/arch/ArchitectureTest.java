@@ -50,6 +50,13 @@ public class ArchitectureTest {
 
         String mermaid = RestAssured.get("q/arch/mermaid").then().statusCode(200).extract().asString();
         assertThat(mermaid).startsWith("flowchart LR").contains("-->");
+
+        for (String level : List.of("context", "container", "component")) {
+            assertThat(RestAssured.get("q/arch/plantuml/" + level).then().statusCode(200).extract().asString())
+                    .startsWith("@startuml");
+            assertThat(RestAssured.get("q/arch/mermaid/" + level).then().statusCode(200).extract().asString())
+                    .startsWith("flowchart LR");
+        }
     }
 
     @Unremovable
