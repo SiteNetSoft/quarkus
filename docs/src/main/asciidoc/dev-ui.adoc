@@ -65,8 +65,9 @@ The *menu* on the left-hand side provides structured access to built-in pages:
 
 | *Architecture*
 | Draws the architecture of the application from what Quarkus knows at build time: the entry points (REST, WebSockets, gRPC, messaging, scheduled jobs), the beans and their injections, the repositories and entities, the REST clients, and the external systems such as databases, message brokers and HTTP services, with the Dev Services that provide them.
-The *System* lens shows the application and the external systems; the *Components* lens shows the components by layer.
-The same model is served as JSON at `/q/arch`, as a C4-PlantUML diagram at `/q/arch/plantuml` and as a Mermaid flowchart at `/q/arch/mermaid`, and is available to coding agents through Dev MCP.
+You zoom through the C4 levels: the *system context*, the *containers* (the application next to its data stores and brokers), the *components* by layer, and the *code* of one component. Double-click an element to zoom into it.
+The same model is served as JSON at `/q/arch`, and each level as a C4-PlantUML diagram at `/q/arch/plantuml/<level>` and as a Mermaid flowchart at `/q/arch/mermaid/<level>`, where `<level>` is `context`, `container` or `component`.
+The model is also available to coding agents through Dev MCP.
 
 | *Dev Services*
 | Displays information about automatically started services (e.g., databases, Kafka brokers).

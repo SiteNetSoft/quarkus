@@ -206,9 +206,10 @@ public final class ArchitectureScanner {
      *
      * @param application the name of the application
      * @param version the version of the application
+     * @param quarkusVersion the version of Quarkus
      * @return the architecture model
      */
-    public ArchitectureModel scan(String application, String version) {
+    public ArchitectureModel scan(String application, String version, String quarkusVersion) {
         addComponents();
         addInjections();
         addEntityRelations();
@@ -230,7 +231,7 @@ public final class ArchitectureScanner {
                 resultEdges.add(edge);
             }
         }
-        return new ArchitectureModel(application, version, result, resultEdges);
+        return new ArchitectureModel(application, version, quarkusVersion, result, resultEdges);
     }
 
     // Components

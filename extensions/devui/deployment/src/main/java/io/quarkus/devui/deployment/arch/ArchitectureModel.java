@@ -1,6 +1,7 @@
 package io.quarkus.devui.deployment.arch;
 
 import java.util.List;
+import java.util.Locale;
 
 /**
  * The architecture of the application, as Quarkus sees it at build time: the components of the application, the
@@ -8,10 +9,12 @@ import java.util.List;
  *
  * @param application the name of the application
  * @param version the version of the application
+ * @param quarkusVersion the version of Quarkus
  * @param nodes the components and external systems
  * @param edges the relations between the nodes
  */
-public record ArchitectureModel(String application, String version, List<Node> nodes, List<Edge> edges) {
+public record ArchitectureModel(String application, String version, String quarkusVersion, List<Node> nodes,
+        List<Edge> edges) {
 
     /**
      * The layers of the component view, from the entry points of the application to the external systems.
@@ -19,9 +22,40 @@ public record ArchitectureModel(String application, String version, List<Node> n
     public static final List<String> LAYERS = List.of(Node.LAYER_ENTRY, Node.LAYER_LOGIC, Node.LAYER_DATA,
             Node.LAYER_INTEGRATION, Node.LAYER_EXTERNAL);
 
+    /**
+     * The node kinds that are entry points for users and clients over the network.
+     */
+    public static final List<String> NETWORK_ENTRY_POINTS = List.of("rest-endpoint", "route", "websocket", "graphql",
+            "grpc-service", "function");
+
     public ArchitectureModel {
         nodes = List.copyOf(nodes);
         edges = List.copyOf(edges);
+    }
+
+    /**
+     * The C4 levels of the architecture.
+     */
+    public enum Level {
+        /**
+         * The application as one software system, with its users and the external systems it uses.
+         */
+        CONTEXT,
+        /**
+         * The Quarkus application and the data stores and brokers it uses.
+         */
+        CONTAINER,
+        /**
+         * The components of the Quarkus application.
+         */
+        COMPONENT;
+
+        /**
+         * @return the name of the level in paths, for example {@code context}
+         */
+        public String path() {
+            return name().toLowerCase(Locale.ROOT);
+        }
     }
 
     /**
@@ -50,10 +84,20 @@ public record ArchitectureModel(String application, String version, List<Node> n
         }
 
         /**
-         * @return whether this node is an external system
+         * @return whether this node is outside the application: a container it uses or an external system
          */
         public boolean isExternal() {
             return LAYER_EXTERNAL.equals(layer);
+        }
+
+        /**
+         * A database, cache or message broker is a C4 container next to the application. The other external nodes
+         * are external software systems.
+         *
+         * @return whether this node is a data store or a message broker
+         */
+        public boolean isContainer() {
+            return isExternal() && ("database".equals(kind) || "cache".equals(kind) || "message-broker".equals(kind));
         }
     }
 
