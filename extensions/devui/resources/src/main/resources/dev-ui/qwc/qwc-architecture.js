@@ -8,6 +8,8 @@ import '@vaadin/checkbox-group';
 import 'qui-ide-link';
 import 'qwc-no-data';
 import { notifier } from 'notifier';
+import { JsonRpc } from 'jsonrpc';
+import { jsonRPCMethods } from 'devui-jsonrpc-data';
 import { msg, str, updateWhenLocaleChanges } from 'localization';
 
 const NODE_WIDTH = 230;
@@ -26,6 +28,11 @@ const LEVEL_CODE = 3;
 const LEVEL_PATHS = ['context', 'container', 'component', 'component'];
 const CONTAINER_KINDS = ['database', 'cache', 'message-broker'];
 const CORNER_RADIUS = 8;
+const OTEL_NAMESPACE = 'quarkus-opentelemetry';
+const HOP_MILLIS = 900;
+const STEP_PAUSE_MILLIS = 450;
+// A replay route prefers the call edges to the edges that only show a type or a relation
+const ROUTE_COSTS = { 'uses': 4, 'relates': 4 };
 
 let elkInstance = null;
 
@@ -299,6 +306,70 @@ export class QwcArchitecture extends QwcHotReloadElement {
             align-items: center;
             gap: 4px;
         }
+        .node.replay-current .outline {
+            stroke: #ff9800;
+            stroke-width: 3;
+        }
+        .replay-route {
+            fill: none;
+            stroke: #ff9800;
+            stroke-width: 3;
+            stroke-linecap: round;
+        }
+        .replay-dot {
+            fill: #ff9800;
+            stroke: var(--lumo-base-color);
+            stroke-width: 2;
+        }
+        .replay-pill {
+            fill: #ff9800;
+        }
+        .replay-pill.error {
+            fill: var(--lumo-error-color, #e53935);
+        }
+        .replay-pill-text {
+            fill: #ffffff;
+            font-size: 10.5px;
+            font-weight: 700;
+        }
+        .replay-buttons {
+            display: flex;
+            gap: 2px;
+        }
+        .replay ol, .replay ul {
+            list-style: none;
+            padding-left: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .replay li {
+            padding: 4px 6px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .replay li:hover {
+            background: var(--lumo-contrast-5pct);
+        }
+        .replay li.current {
+            background: rgba(255, 152, 0, 0.18);
+        }
+        .replay li.pending {
+            opacity: 0.5;
+        }
+        .replay li.error .duration {
+            color: var(--lumo-error-text-color, #e53935);
+        }
+        .replay .duration {
+            float: right;
+            font-variant-numeric: tabular-nums;
+            color: var(--lumo-secondary-text-color);
+        }
+        .replay .span-name {
+            display: block;
+            font-size: var(--lumo-font-size-xs);
+            color: var(--lumo-secondary-text-color);
+        }
         .swatch {
             width: 10px;
             height: 10px;
@@ -315,7 +386,8 @@ export class QwcArchitecture extends QwcHotReloadElement {
         _layers: { state: true },
         _selected: { state: true },
         _view: { state: true },
-        _dragging: { state: true }
+        _dragging: { state: true },
+        _replay: { state: true }
     };
 
     constructor() {
@@ -335,6 +407,16 @@ export class QwcArchitecture extends QwcHotReloadElement {
         this._elk = null;
         this._elkPending = null;
         this._elkFailed = false;
+        this._replay = null;
+        this._replayTimer = null;
+        this._replayFrame = null;
+        this._animatedStep = null;
+        this._otel = null;
+    }
+
+    disconnectedCallback() {
+        this._stopReplay();
+        super.disconnectedCallback();
     }
 
     connectedCallback() {
@@ -364,6 +446,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
             this._fitPending = false;
             this._fit();
         }
+        this._animateStep();
     }
 
     render() {
@@ -398,7 +481,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     ${this._renderControls()}
                     ${this._renderLegend()}
                 </div>
-                ${this._renderDetails()}
+                ${this._replay ? this._renderReplay() : this._renderDetails()}
             </div>`;
     }
 
@@ -457,6 +540,9 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     ?disabled=${this._level === LEVEL_CONTEXT} @click=${() => this._goTo(this._level - 1)}>
                     <vaadin-icon icon="font-awesome-solid:arrow-turn-up"></vaadin-icon>
                 </vaadin-button>
+                <vaadin-button theme="icon tertiary" title="${msg('Replay a trace', { id: 'architecture-replay' })}" @click=${this._openReplay}>
+                    <vaadin-icon icon="font-awesome-solid:circle-play"></vaadin-icon>
+                </vaadin-button>
                 <vaadin-button theme="icon tertiary" title="${msg('Zoom in', { id: 'architecture-zoom-in' })}" @click=${() => this._zoom(1.2)}>
                     <vaadin-icon icon="font-awesome-solid:magnifying-glass-plus"></vaadin-icon>
                 </vaadin-button>
@@ -508,14 +594,17 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     ${(layout.bands || []).map(b => svg`<rect class="band" x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="12"></rect>`)}
                     ${layout.titles.map(t => svg`<text class="layer-title" x="${t.x}" y="${t.y}" text-anchor="middle">${t.text}</text>`)}
                     ${layout.edges.map(e => this._renderEdge(e, layout, focus))}
+                    ${this._renderReplayRoute(layout)}
                     ${layout.nodes.map(n => this._renderNode(n, focus))}
+                    ${this._renderReplayMarks(layout)}
                 </g>
             </svg>`;
     }
 
     _renderNode(node, focus) {
         const faded = focus && !focus.has(node.id);
-        const selected = this._selected === node.id;
+        const step = this._currentStep();
+        const selected = this._selected === node.id || (step !== null && step.node === node.id);
         const w = node.width || NODE_WIDTH;
         const h = node.height || NODE_HEIGHT;
         const style = node.style || C4.component;
@@ -1130,6 +1219,14 @@ export class QwcArchitecture extends QwcHotReloadElement {
     }
 
     _focusSet(layout) {
+        const step = this._currentStep();
+        if (step) {
+            const focus = new Set(step.path);
+            for (const done of this._replay.steps.slice(0, this._replay.index + 1)) {
+                done.path.forEach(id => focus.add(id));
+            }
+            return focus;
+        }
         const filtered = layout.nodes.filter(n => n.matches === false).length > 0;
         if (!this._selected && !filtered) {
             return null;
@@ -1150,6 +1247,391 @@ export class QwcArchitecture extends QwcHotReloadElement {
             }
         }
         return focus.size > 0 ? focus : null;
+    }
+
+    // Trace replay
+
+    /**
+     * Opens the trace replay panel on the component view. The spans come from the Dev UI traces store of the
+     * OpenTelemetry extension, when the application uses it.
+     */
+    _openReplay() {
+        this._goTo(LEVEL_COMPONENT);
+        this._selected = null;
+        const available = jsonRPCMethods.includes(`${OTEL_NAMESPACE}_getSnapshot`);
+        this._replay = { available, traces: null, trace: null, steps: [], index: -1, playing: false };
+        if (available) {
+            this._loadTraces();
+        }
+    }
+
+    _closeReplay() {
+        this._stopReplay();
+        this._replay = null;
+    }
+
+    _loadTraces() {
+        if (!this._otel) {
+            this._otel = new JsonRpc(OTEL_NAMESPACE);
+        }
+        this._otel.getSnapshot().then(response => {
+            if (this._replay) {
+                this._replay = { ...this._replay, traces: response.result.traces ?? [] };
+            }
+        });
+    }
+
+    _selectTrace(trace) {
+        this._stopReplay();
+        this._replay = { ...this._replay, trace, steps: this._stepsOf(trace), index: -1, playing: false };
+        this._play();
+    }
+
+    _play() {
+        const replay = this._replay;
+        if (!replay || replay.steps.length === 0) {
+            return;
+        }
+        const index = replay.index >= replay.steps.length - 1 ? -1 : replay.index;
+        this._replay = { ...replay, index, playing: true };
+        this._advance();
+    }
+
+    _pause() {
+        this._stopReplay();
+        if (this._replay) {
+            this._replay = { ...this._replay, playing: false };
+        }
+    }
+
+    _stepTo(index) {
+        this._stopReplay();
+        const last = this._replay.steps.length - 1;
+        this._replay = { ...this._replay, index: Math.max(-1, Math.min(last, index)), playing: false };
+    }
+
+    _advance() {
+        const replay = this._replay;
+        if (!replay || !replay.playing) {
+            return;
+        }
+        const index = replay.index + 1;
+        if (index >= replay.steps.length) {
+            this._replay = { ...replay, playing: false };
+            return;
+        }
+        this._replay = { ...replay, index };
+        const hops = Math.max(1, replay.steps[index].path.length - 1);
+        this._replayTimer = setTimeout(() => this._advance(), hops * HOP_MILLIS + STEP_PAUSE_MILLIS);
+    }
+
+    _stopReplay() {
+        clearTimeout(this._replayTimer);
+        cancelAnimationFrame(this._replayFrame);
+        this._replayTimer = null;
+        this._replayFrame = null;
+    }
+
+    _currentStep() {
+        const replay = this._replay;
+        return replay && replay.index >= 0 && replay.index < replay.steps.length ? replay.steps[replay.index] : null;
+    }
+
+    /**
+     * Turns the spans of a trace into replay steps. A step is a span that belongs to a node of the model. It goes
+     * from the node of the closest ancestor span to its own node, along the shortest path in the model, so the
+     * beans without spans light up on the way.
+     */
+    _stepsOf(trace) {
+        const spans = [...trace.spans].sort((a, b) => a.startEpochNanos - b.startEpochNanos);
+        const byId = new Map(spans.map(s => [s.spanId, s]));
+        const mapped = new Map(spans.map(s => [s.spanId, this._nodeForSpan(s)]));
+        const start = spans.length > 0 ? spans[0].startEpochNanos : 0;
+        const steps = [];
+        for (const span of spans) {
+            const target = mapped.get(span.spanId);
+            if (!target) {
+                continue;
+            }
+            let from = target.via || null;
+            for (let parent = byId.get(span.parentSpanId); !from && parent; parent = byId.get(parent.parentSpanId)) {
+                from = mapped.get(parent.spanId) ? mapped.get(parent.spanId).node : null;
+            }
+            if (from === target.node) {
+                continue;
+            }
+            steps.push({
+                span, from, node: target.node,
+                path: from ? this._path(from, target.node) : [target.node],
+                offset: (span.startEpochNanos - start) / 1e6,
+                duration: span.durationNanos / 1e6,
+                error: span.statusCode === 'ERROR'
+            });
+        }
+        return steps;
+    }
+
+    /**
+     * Finds the node of the model that a span belongs to, from the OpenTelemetry semantic conventions.
+     *
+     * @return the node id, and for a received message the broker it comes from, or null
+     */
+    _nodeForSpan(span) {
+        const attributes = span.attributes || {};
+        const nodes = this._model.nodes;
+        const edges = this._model.edges;
+        const isBroker = id => nodes.some(n => n.id === id && n.kind === 'message-broker');
+
+        // Messaging: the topic is the label of the edges to and from the broker
+        const destination = attributes['messaging.destination.name'];
+        if (destination && span.kind === 'PRODUCER') {
+            const edge = edges.find(e => e.label === destination && isBroker(e.target));
+            return edge ? { node: edge.target } : null;
+        }
+        if (destination && span.kind === 'CONSUMER') {
+            const edge = edges.find(e => e.label === destination && isBroker(e.source));
+            return edge ? { node: edge.target, via: edge.source } : null;
+        }
+
+        // Database
+        const database = attributes['db.system.name'] || attributes['db.system'];
+        if (database) {
+            const stores = nodes.filter(n => n.kind === 'database');
+            const store = stores.find(n => (n.technology || '').toLowerCase().includes(database.toLowerCase())) || stores[0];
+            return store ? { node: store.id } : null;
+        }
+
+        // Code location, for example the method of a REST resource
+        const code = attributes['code.function.name']
+            || (attributes['code.namespace'] ? `${attributes['code.namespace']}.${attributes['code.function'] || ''}` : null);
+        if (code) {
+            const owner = nodes.filter(n => n.className && code.startsWith(n.className + '.'))
+                .sort((a, b) => b.className.length - a.className.length)[0];
+            if (owner) {
+                return { node: owner.id };
+            }
+        }
+
+        // Outgoing HTTP call
+        const host = attributes['server.address'];
+        if (span.kind === 'CLIENT' && host) {
+            const port = attributes['server.port'];
+            const service = nodes.find(n => n.id === `http:${host}${port ? ':' + port : ''}`)
+                || nodes.find(n => n.layer === 'external' && (n.details || []).some(d => d.includes(host)));
+            return service ? { node: service.id } : null;
+        }
+
+        // Incoming HTTP request
+        const route = attributes['http.route'];
+        if (span.kind === 'SERVER' && route) {
+            const request = `${attributes['http.request.method'] || ''} ${route}`.trim();
+            const endpoint = nodes.find(n => n.kind === 'rest-endpoint' && (n.details || []).includes(request))
+                || nodes.find(n => n.kind === 'rest-endpoint' && (n.details || []).some(d => d.endsWith(' ' + route)));
+            return endpoint ? { node: endpoint.id } : null;
+        }
+
+        // A span name with a class name, for example "1_org.acme.Report#run" for a scheduled method
+        const named = nodes.find(n => n.className && (span.name.includes(n.className + '#')
+            || span.name.includes(n.className + '.')
+            || span.name.startsWith(n.className.substring(n.className.lastIndexOf('.') + 1) + '.')));
+        return named ? { node: named.id } : null;
+    }
+
+    /**
+     * @return the node ids on the cheapest path from one node to another, along the edges of the model, or the two
+     *         nodes when no path exists. The path follows the direction of the edges when it can.
+     */
+    _path(from, to) {
+        for (const directed of [true, false]) {
+            const cost = new Map([[from, 0]]);
+            const previous = new Map([[from, null]]);
+            const open = new Set([from]);
+            while (open.size > 0) {
+                const id = [...open].reduce((a, b) => cost.get(a) <= cost.get(b) ? a : b);
+                open.delete(id);
+                if (id === to) {
+                    const path = [];
+                    for (let at = to; at !== null; at = previous.get(at)) {
+                        path.unshift(at);
+                    }
+                    return path;
+                }
+                for (const edge of this._model.edges) {
+                    const next = edge.source === id ? edge.target : (!directed && edge.target === id ? edge.source : null);
+                    const total = cost.get(id) + (ROUTE_COSTS[edge.kind] || 1);
+                    if (next && (!cost.has(next) || total < cost.get(next))) {
+                        cost.set(next, total);
+                        previous.set(next, id);
+                        open.add(next);
+                    }
+                }
+            }
+        }
+        return [from, to];
+    }
+
+    /**
+     * Draws the route of the current step over the edges, one path for each hop, in the order of the replay.
+     */
+    _renderReplayRoute(layout) {
+        const step = this._currentStep();
+        if (!step) {
+            return nothing;
+        }
+        const hops = [];
+        for (let i = 0; i < step.path.length - 1; i++) {
+            const a = step.path[i], b = step.path[i + 1];
+            const edge = layout.edges.find(e => e.source === a && e.target === b)
+                || layout.edges.find(e => e.source === b && e.target === a);
+            const source = edge && layout.byId.get(edge.source), target = edge && layout.byId.get(edge.target);
+            if (source && target) {
+                const path = edge.points ? this._routePath(edge.points) : this._edgePath(source, target, edge.offset || 0);
+                hops.push(svg`<path class="replay-route" d="${path.d}" data-reverse="${edge.source !== a}"></path>`);
+            }
+        }
+        return svg`${hops}<circle class="replay-dot" r="7" cx="-100" cy="-100"></circle>`;
+    }
+
+    /**
+     * Shows the duration of each replayed span above its node.
+     */
+    _renderReplayMarks(layout) {
+        const replay = this._replay;
+        if (!replay || replay.index < 0) {
+            return nothing;
+        }
+        const marks = new Map();
+        for (const step of replay.steps.slice(0, replay.index + 1)) {
+            marks.set(step.node, step);
+        }
+        return [...marks.values()].map(step => {
+            const node = layout.byId.get(step.node);
+            if (!node) {
+                return nothing;
+            }
+            const text = this._formatMillis(step.duration);
+            const width = text.length * 6.6 + 14;
+            const x = node.x + (node.width || NODE_WIDTH) / 2;
+            return svg`<rect class="replay-pill ${step.error ? 'error' : ''}" x="${x - width / 2}" y="${node.y - 22}" width="${width}" height="18" rx="9"></rect>
+                <text class="replay-pill-text" x="${x}" y="${node.y - 9.5}" text-anchor="middle">${text}</text>`;
+        });
+    }
+
+    /**
+     * Moves the dot along the route of the current step, once for each new step.
+     */
+    _animateStep() {
+        const replay = this._replay;
+        const step = this._currentStep();
+        const key = step ? `${replay.trace.traceId}/${replay.index}` : null;
+        if (key === this._animatedStep) {
+            return;
+        }
+        this._animatedStep = key;
+        cancelAnimationFrame(this._replayFrame);
+        const dot = this.shadowRoot.querySelector('.replay-dot');
+        const routes = [...this.shadowRoot.querySelectorAll('.replay-route')];
+        if (!dot || routes.length === 0) {
+            return;
+        }
+        const lengths = routes.map(r => r.getTotalLength());
+        const begin = performance.now();
+        const frame = now => {
+            const progress = Math.min(1, (now - begin) / (routes.length * HOP_MILLIS));
+            const hop = Math.min(routes.length - 1, Math.floor(progress * routes.length));
+            const local = progress * routes.length - hop;
+            const along = routes[hop].dataset.reverse === 'true' ? 1 - Math.min(1, local) : Math.min(1, local);
+            const point = routes[hop].getPointAtLength(along * lengths[hop]);
+            dot.setAttribute('cx', point.x);
+            dot.setAttribute('cy', point.y);
+            if (progress < 1) {
+                this._replayFrame = requestAnimationFrame(frame);
+            }
+        };
+        this._replayFrame = requestAnimationFrame(frame);
+    }
+
+    _renderReplay() {
+        const replay = this._replay;
+        return html`<div class="details replay">
+            <h3>${msg('Trace replay', { id: 'architecture-replay-title' })}
+                <vaadin-button theme="icon tertiary small" @click=${this._closeReplay}>
+                    <vaadin-icon icon="font-awesome-solid:xmark"></vaadin-icon>
+                </vaadin-button>
+            </h3>
+            ${!replay.available
+                ? html`<span class="kind">${msg('Add the OpenTelemetry extension (quarkus-opentelemetry) to replay the traces of the application.', { id: 'architecture-replay-no-otel' })}</span>`
+                : replay.trace ? this._renderReplaySteps() : this._renderTraceList()}
+        </div>`;
+    }
+
+    _renderTraceList() {
+        // Traces that start with an outgoing call, like the schema creation at startup, have no entry point
+        const all = this._replay.traces;
+        const traces = all === null ? null : all.filter(t => {
+            const root = this._rootOf(t);
+            return root && root.kind !== 'CLIENT' && root.kind !== 'PRODUCER';
+        });
+        return html`
+            <vaadin-button theme="tertiary small" @click=${this._loadTraces}>
+                <vaadin-icon icon="font-awesome-solid:rotate" slot="prefix"></vaadin-icon>${msg('Refresh', { id: 'architecture-replay-refresh' })}
+            </vaadin-button>
+            ${traces === null ? html`<span class="kind">${msg('Loading the traces', { id: 'architecture-replay-loading' })}</span>`
+                : traces.length === 0 ? html`<span class="kind">${msg('No traces yet. Call the application, then refresh.', { id: 'architecture-replay-empty' })}</span>`
+                : html`<ul>${traces.map(trace => {
+                    const root = this._rootOf(trace);
+                    return html`<li class="${root && root.statusCode === 'ERROR' ? 'error' : ''}" @click=${() => this._selectTrace(trace)}>
+                        ${root ? root.name : trace.traceId}<span class="duration">${root ? this._formatMillis(root.durationNanos / 1e6) : ''}</span>
+                        <span class="span-name">${root ? new Date(root.startEpochNanos / 1e6).toLocaleTimeString() : ''} · ${trace.spans.length} spans</span>
+                    </li>`;
+                })}</ul>`}
+            ${all && all.length > traces.length ? html`<span class="kind">${msg(str`${all.length - traces.length} traces without an entry point are hidden.`, { id: 'architecture-replay-hidden' })}</span>` : nothing}`;
+    }
+
+    _renderReplaySteps() {
+        const replay = this._replay;
+        const root = this._rootOf(replay.trace);
+        const name = id => {
+            const node = this._model.nodes.find(n => n.id === id);
+            return node ? node.name : id;
+        };
+        return html`
+            <span class="kind">${root ? root.name : ''} · ${root ? this._formatMillis(root.durationNanos / 1e6) : ''}</span>
+            <div class="replay-buttons">
+                <vaadin-button theme="icon tertiary small" title="${msg('All traces', { id: 'architecture-replay-back' })}"
+                    @click=${() => { this._stopReplay(); this._replay = { ...replay, trace: null, steps: [], index: -1, playing: false }; }}>
+                    <vaadin-icon icon="font-awesome-solid:list"></vaadin-icon>
+                </vaadin-button>
+                <vaadin-button theme="icon tertiary small" title="${msg('Previous step', { id: 'architecture-replay-previous' })}" @click=${() => this._stepTo(replay.index - 1)}>
+                    <vaadin-icon icon="font-awesome-solid:backward-step"></vaadin-icon>
+                </vaadin-button>
+                ${replay.playing
+                    ? html`<vaadin-button theme="icon tertiary small" title="${msg('Pause', { id: 'architecture-replay-pause' })}" @click=${this._pause}>
+                        <vaadin-icon icon="font-awesome-solid:pause"></vaadin-icon></vaadin-button>`
+                    : html`<vaadin-button theme="icon tertiary small" title="${msg('Play', { id: 'architecture-replay-play' })}" @click=${this._play}>
+                        <vaadin-icon icon="font-awesome-solid:play"></vaadin-icon></vaadin-button>`}
+                <vaadin-button theme="icon tertiary small" title="${msg('Next step', { id: 'architecture-replay-next' })}" @click=${() => this._stepTo(replay.index + 1)}>
+                    <vaadin-icon icon="font-awesome-solid:forward-step"></vaadin-icon>
+                </vaadin-button>
+            </div>
+            ${replay.steps.length === 0
+                ? html`<span class="kind">${msg('No span of this trace matches a component.', { id: 'architecture-replay-no-steps' })}</span>`
+                : html`<ol>${replay.steps.map((step, i) => html`
+                    <li class="${i === replay.index ? 'current' : i > replay.index ? 'pending' : ''} ${step.error ? 'error' : ''}" @click=${() => this._stepTo(i)}>
+                        ${step.from ? `${name(step.from)} → ` : ''}${name(step.node)}
+                        <span class="duration">+${this._formatMillis(step.offset)} · ${this._formatMillis(step.duration)}</span>
+                        <span class="span-name">${step.span.name}</span>
+                    </li>`)}</ol>`}`;
+    }
+
+    _rootOf(trace) {
+        const ids = new Set(trace.spans.map(s => s.spanId));
+        return trace.spans.filter(s => !ids.has(s.parentSpanId))
+            .sort((a, b) => a.startEpochNanos - b.startEpochNanos)[0] || null;
+    }
+
+    _formatMillis(millis) {
+        return millis < 10 ? `${millis.toFixed(1)} ms` : `${Math.round(millis)} ms`;
     }
 
     // Interaction
