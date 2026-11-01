@@ -34,6 +34,132 @@ const STEP_PAUSE_MILLIS = 450;
 // A replay route prefers the call edges to the edges that only show a type or a relation
 const ROUTE_COSTS = { 'uses': 4, 'relates': 4 };
 const TRAFFIC_RELOAD_MILLIS = 1000;
+// The enum values of OTLP, in the order of their numbers
+const OTLP_SPAN_KINDS = ['INTERNAL', 'INTERNAL', 'SERVER', 'CLIENT', 'PRODUCER', 'CONSUMER'];
+const OTLP_STATUS_CODES = ['UNSET', 'OK', 'ERROR'];
+const NO_PARENT_SPAN = '0000000000000000';
+
+/**
+ * Reads the spans of an OTLP JSON file. The file holds one export request, or one request per line as the file
+ * exporter of the OpenTelemetry Collector writes them. The spans get the format of the Dev UI traces store.
+ */
+function spansOfOtlp(text) {
+    const trimmed = text.trim();
+    let requests;
+    try {
+        requests = [JSON.parse(trimmed)];
+    } catch (e) {
+        requests = trimmed.split('\n').filter(line => line.trim()).map(line => JSON.parse(line));
+    }
+    const spans = [];
+    for (const request of requests.flat()) {
+        // Older exports and the Tempo API use other names for the same levels
+        for (const resourceSpans of request.resourceSpans || request.batches || []) {
+            const resource = otlpAttributes(resourceSpans.resource && resourceSpans.resource.attributes);
+            for (const scopeSpans of resourceSpans.scopeSpans || resourceSpans.instrumentationLibrarySpans || []) {
+                const scope = scopeSpans.scope || scopeSpans.instrumentationLibrary || {};
+                for (const span of scopeSpans.spans || []) {
+                    spans.push(spanOfOtlp(span, resource, scope));
+                }
+            }
+        }
+    }
+    return spans;
+}
+
+function spanOfOtlp(span, resource, scope) {
+    const start = BigInt(span.startTimeUnixNano || 0);
+    const end = BigInt(span.endTimeUnixNano || 0);
+    const status = span.status || {};
+    return {
+        traceId: otlpId(span.traceId),
+        spanId: otlpId(span.spanId),
+        parentSpanId: span.parentSpanId ? otlpId(span.parentSpanId) : NO_PARENT_SPAN,
+        name: span.name || '',
+        kind: otlpEnum(span.kind, OTLP_SPAN_KINDS, 'SPAN_KIND_'),
+        startEpochNanos: Number(start),
+        endEpochNanos: Number(end),
+        durationNanos: Number(end - start),
+        statusCode: otlpEnum(status.code, OTLP_STATUS_CODES, 'STATUS_CODE_'),
+        statusDescription: status.message || '',
+        scopeName: scope.name || '',
+        resourceServiceName: resource['service.name'] || '',
+        resourceServiceVersion: resource['service.version'] || '',
+        attributes: otlpAttributes(span.attributes),
+        events: (span.events || []).map(event => `${event.name} @${event.timeUnixNano}`)
+    };
+}
+
+function otlpAttributes(attributes) {
+    const result = {};
+    for (const attribute of attributes || []) {
+        result[attribute.key] = otlpValue(attribute.value);
+    }
+    return result;
+}
+
+function otlpValue(value) {
+    if (!value) {
+        return '';
+    }
+    if ('stringValue' in value) {
+        return value.stringValue;
+    }
+    if ('intValue' in value) {
+        return String(value.intValue);
+    }
+    if ('doubleValue' in value) {
+        return String(value.doubleValue);
+    }
+    if ('boolValue' in value) {
+        return String(value.boolValue);
+    }
+    if ('arrayValue' in value) {
+        return `[${(value.arrayValue.values || []).map(otlpValue).join(', ')}]`;
+    }
+    if ('kvlistValue' in value) {
+        return JSON.stringify(otlpAttributes(value.kvlistValue.values));
+    }
+    return value.bytesValue || '';
+}
+
+function otlpEnum(value, names, prefix) {
+    if (typeof value === 'number') {
+        return names[value] || names[0];
+    }
+    if (typeof value === 'string' && value.startsWith(prefix)) {
+        return value.substring(prefix.length).replace('UNSPECIFIED', names[0]);
+    }
+    return value || names[0];
+}
+
+/**
+ * @return the id in lower-case hex. OTLP JSON uses hex, but the generic protobuf JSON mapping uses base64.
+ */
+function otlpId(id) {
+    if (!id || /^[0-9a-fA-F]+$/.test(id) && (id.length === 16 || id.length === 32)) {
+        return (id || '').toLowerCase();
+    }
+    return [...atob(id)].map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Groups the spans by trace, in the format of the Dev UI traces store, with the newest trace first.
+ */
+function tracesOfSpans(spans) {
+    const traces = new Map();
+    for (const span of spans) {
+        let trace = traces.get(span.traceId);
+        if (!trace) {
+            trace = { traceId: span.traceId, windowStart: span.startEpochNanos, windowEnd: span.endEpochNanos, spans: [] };
+            traces.set(span.traceId, trace);
+        }
+        trace.windowStart = Math.min(trace.windowStart, span.startEpochNanos);
+        trace.windowEnd = Math.max(trace.windowEnd, span.endEpochNanos);
+        trace.spans.push(span);
+    }
+    return [...traces.values()].sort((a, b) => b.windowStart - a.windowStart);
+}
 
 let elkInstance = null;
 
@@ -364,7 +490,11 @@ export class QwcArchitecture extends QwcHotReloadElement {
         }
         .replay-buttons {
             display: flex;
+            flex-wrap: wrap;
             gap: 2px;
+        }
+        .details .kind.warning {
+            color: var(--lumo-warning-text-color, #b26a00);
         }
         .details.replay {
             overflow-x: hidden;
@@ -1308,7 +1438,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
         this._goTo(LEVEL_COMPONENT);
         this._selected = null;
         const available = jsonRPCMethods.includes(`${OTEL_NAMESPACE}_getSnapshot`);
-        this._replay = { available, traces: null, trace: null, steps: [], index: -1, playing: false };
+        this._replay = { available, traces: null, file: null, filter: '', trace: null, steps: [], index: -1, playing: false };
         if (available) {
             this._loadTraces();
         }
@@ -1325,13 +1455,67 @@ export class QwcArchitecture extends QwcHotReloadElement {
             this._otel = new JsonRpc(OTEL_NAMESPACE);
         }
         this._otel.getSnapshot().then(response => {
-            if (this._replay) {
+            if (this._replay && !this._replay.file) {
                 this._replay = { ...this._replay, traces: response.result.traces ?? [] };
                 if (this._traffic) {
-                    this._traffic = this._trafficOf(this._entryTraces());
+                    this._traffic = this._trafficOf(this._visibleTraces());
                 }
             }
         });
+    }
+
+    /**
+     * Goes back from the traces of a file to the traces of the running application.
+     */
+    _showLiveTraces() {
+        const traffic = !!this._traffic;
+        this._showTraffic(false);
+        this._replay = { ...this._replay, traces: null, file: null };
+        this._loadTraces();
+        this._showTraffic(traffic);
+    }
+
+    /**
+     * Loads the traces of an OTLP JSON file, for example an export from production. The browser reads the file, and
+     * the data does not leave it. When the file holds many services, only the spans of this application stay.
+     */
+    async _importFile(file) {
+        if (!file) {
+            return;
+        }
+        let spans;
+        try {
+            spans = spansOfOtlp(await file.text());
+        } catch (e) {
+            notifier.showErrorMessage(msg(str`${file.name} is not an OTLP JSON file: ${e.message}`, { id: 'architecture-import-invalid' }));
+            return;
+        }
+        const application = this._model.application;
+        const own = spans.filter(s => s.resourceServiceName === application);
+        const kept = own.length > 0 ? own : spans;
+        const warnings = [];
+        if (own.length === 0 && spans.length > 0) {
+            const services = [...new Set(spans.map(s => s.resourceServiceName || '?'))].join(', ');
+            warnings.push(msg(str`No span comes from the service ${application}. The page shows the spans of: ${services}.`, { id: 'architecture-import-other-service' }));
+        } else if (own.length < spans.length) {
+            warnings.push(msg(str`${spans.length - own.length} spans of other services are left out.`, { id: 'architecture-import-left-out' }));
+        }
+        const versions = [...new Set(kept.map(s => s.resourceServiceVersion).filter(v => v && v !== this._model.version))];
+        if (versions.length > 0) {
+            warnings.push(msg(str`The spans come from version ${versions.join(', ')}, and the application has version ${this._model.version}. Some spans can match no component.`, { id: 'architecture-import-version' }));
+        }
+        const traffic = !!this._traffic;
+        this._showTraffic(false);
+        this._stopReplay();
+        this._replay = { ...this._replay, traces: tracesOfSpans(kept), file: { name: file.name, warnings }, trace: null, steps: [], index: -1, playing: false };
+        this._showTraffic(traffic);
+    }
+
+    _filterTraces(filter) {
+        this._replay = { ...this._replay, filter };
+        if (this._traffic) {
+            this._traffic = this._trafficOf(this._visibleTraces());
+        }
     }
 
     _selectTrace(trace) {
@@ -1613,24 +1797,41 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     <vaadin-icon icon="font-awesome-solid:xmark"></vaadin-icon>
                 </vaadin-button>
             </h3>
-            ${!replay.available
-                ? html`<span class="kind">${msg('Add the OpenTelemetry extension (quarkus-opentelemetry) to replay the traces of the application.', { id: 'architecture-replay-no-otel' })}</span>`
-                : replay.trace ? this._renderReplaySteps() : this._renderTraceList()}
+            ${replay.trace ? this._renderReplaySteps() : this._renderTraceList()}
         </div>`;
     }
 
     _renderTraceList() {
-        const all = this._replay.traces;
-        const traces = all === null ? null : this._entryTraces();
+        const replay = this._replay;
+        if (!replay.available && !replay.file) {
+            return html`<span class="kind">${msg('Add the OpenTelemetry extension (quarkus-opentelemetry) to replay the traces of the application.', { id: 'architecture-replay-no-otel' })}</span>
+                ${this._renderImportButton()}`;
+        }
+        const all = replay.traces === null ? null : this._entryTraces();
+        const traces = all === null ? null : this._visibleTraces();
         return html`
-            <vaadin-button theme="tertiary small" @click=${this._loadTraces}>
-                <vaadin-icon icon="font-awesome-solid:rotate" slot="prefix"></vaadin-icon>${msg('Refresh', { id: 'architecture-replay-refresh' })}
-            </vaadin-button>
+            <div class="replay-buttons">
+                ${replay.file
+                    ? replay.available ? html`<vaadin-button theme="tertiary small" @click=${this._showLiveTraces}>
+                        <vaadin-icon icon="font-awesome-solid:satellite-dish" slot="prefix"></vaadin-icon>${msg('Live traces', { id: 'architecture-import-live' })}
+                    </vaadin-button>` : nothing
+                    : html`<vaadin-button theme="tertiary small" @click=${this._loadTraces}>
+                        <vaadin-icon icon="font-awesome-solid:rotate" slot="prefix"></vaadin-icon>${msg('Refresh', { id: 'architecture-replay-refresh' })}
+                    </vaadin-button>`}
+                ${this._renderImportButton()}
+            </div>
+            ${replay.file ? html`<span class="kind">${msg(str`File: ${replay.file.name}`, { id: 'architecture-import-file' })}</span>
+                ${replay.file.warnings.map(w => html`<span class="kind warning">${w}</span>`)}` : nothing}
+            <vaadin-text-field theme="small" clear-button-visible placeholder="${msg('Filter: trace id, span name or attribute value', { id: 'architecture-replay-filter' })}"
+                .value=${replay.filter} @value-changed=${e => this._filterTraces(e.detail.value)}></vaadin-text-field>
             <vaadin-checkbox label="${msg('Show all the traces on the diagram', { id: 'architecture-traffic' })}"
                 .checked=${!!this._traffic} @checked-changed=${e => this._showTraffic(e.detail.value)}></vaadin-checkbox>
             ${this._renderTrafficTable()}
             ${traces === null ? html`<span class="kind">${msg('Loading the traces', { id: 'architecture-replay-loading' })}</span>`
-                : traces.length === 0 ? html`<span class="kind">${msg('No traces yet. Call the application, then refresh.', { id: 'architecture-replay-empty' })}</span>`
+                : traces.length === 0 ? html`<span class="kind">${replay.filter
+                    ? msg('No trace matches the filter.', { id: 'architecture-replay-no-match' })
+                    : replay.file ? msg('The file has no traces.', { id: 'architecture-import-empty' })
+                    : msg('No traces yet. Call the application, then refresh.', { id: 'architecture-replay-empty' })}</span>`
                 : html`<ul>${traces.map(trace => {
                     const root = this._rootOf(trace);
                     return html`<li class="${root && root.statusCode === 'ERROR' ? 'error' : ''}" @click=${() => this._selectTrace(trace)}>
@@ -1638,7 +1839,16 @@ export class QwcArchitecture extends QwcHotReloadElement {
                         <span class="span-name">${root ? new Date(root.startEpochNanos / 1e6).toLocaleTimeString() : ''} · ${trace.spans.length} spans</span>
                     </li>`;
                 })}</ul>`}
-            ${all && all.length > traces.length ? html`<span class="kind">${msg(str`${all.length - traces.length} traces without an entry point are hidden.`, { id: 'architecture-replay-hidden' })}</span>` : nothing}`;
+            ${all && replay.traces.length > all.length ? html`<span class="kind">${msg(str`${replay.traces.length - all.length} traces without an entry point are hidden.`, { id: 'architecture-replay-hidden' })}</span>` : nothing}`;
+    }
+
+    _renderImportButton() {
+        return html`<input type="file" id="trace-file" hidden accept=".json,.jsonl,.ndjson,application/json"
+                @change=${e => { this._importFile(e.target.files[0]); e.target.value = ''; }}>
+            <vaadin-button theme="tertiary small" title="${msg('Load the traces of an OTLP JSON file. The file stays in the browser.', { id: 'architecture-import-title' })}"
+                @click=${() => this.shadowRoot.querySelector('#trace-file').click()}>
+                <vaadin-icon icon="font-awesome-solid:file-import" slot="prefix"></vaadin-icon>${msg('Import a file', { id: 'architecture-import' })}
+            </vaadin-button>`;
     }
 
     _renderReplaySteps() {
@@ -1689,6 +1899,21 @@ export class QwcArchitecture extends QwcHotReloadElement {
     }
 
     /**
+     * @return the traces that start at an entry point and match the filter. A trace matches when its id, the name
+     *         of one of its spans or the value of one of its attributes contains the filter.
+     */
+    _visibleTraces() {
+        const filter = (this._replay && this._replay.filter || '').trim().toLowerCase();
+        const traces = this._entryTraces();
+        if (!filter) {
+            return traces;
+        }
+        return traces.filter(trace => trace.traceId.includes(filter) || trace.spans.some(span =>
+                span.name.toLowerCase().includes(filter)
+                || Object.values(span.attributes || {}).some(value => String(value).toLowerCase().includes(filter))));
+    }
+
+    /**
      * Shows or hides the traffic of all the traces on the diagram. While it shows, new spans reload the traces.
      */
     _showTraffic(show) {
@@ -1697,17 +1922,19 @@ export class QwcArchitecture extends QwcHotReloadElement {
             this._spanStream = null;
         }
         clearTimeout(this._trafficReload);
-        if (!show || !this._replay || !this._replay.available) {
+        if (!show || !this._replay || !this._replay.available && !this._replay.file) {
             this._traffic = null;
             this.requestUpdate();
             return;
         }
         this._selected = null;
-        this._traffic = this._trafficOf(this._entryTraces());
-        this._spanStream = this._otel.streamSpans().onNext(() => {
-            clearTimeout(this._trafficReload);
-            this._trafficReload = setTimeout(() => this._loadTraces(), TRAFFIC_RELOAD_MILLIS);
-        });
+        this._traffic = this._trafficOf(this._visibleTraces());
+        if (!this._replay.file) {
+            this._spanStream = this._otel.streamSpans().onNext(() => {
+                clearTimeout(this._trafficReload);
+                this._trafficReload = setTimeout(() => this._loadTraces(), TRAFFIC_RELOAD_MILLIS);
+            });
+        }
         this.requestUpdate();
     }
 
