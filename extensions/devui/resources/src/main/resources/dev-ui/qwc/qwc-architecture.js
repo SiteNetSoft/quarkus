@@ -33,6 +33,7 @@ const HOP_MILLIS = 900;
 const STEP_PAUSE_MILLIS = 450;
 // A replay route prefers the call edges to the edges that only show a type or a relation
 const ROUTE_COSTS = { 'uses': 4, 'relates': 4 };
+const TRAFFIC_RELOAD_MILLIS = 1000;
 
 let elkInstance = null;
 
@@ -332,9 +333,41 @@ export class QwcArchitecture extends QwcHotReloadElement {
             font-size: 10.5px;
             font-weight: 700;
         }
+        .edge.traffic {
+            stroke: #ff9800;
+            stroke-opacity: 0.75;
+        }
+        .traffic-pill-text {
+            fill: #ffffff;
+            font-size: 10.5px;
+            font-weight: 700;
+        }
+        .replay table {
+            border-collapse: collapse;
+            font-size: var(--lumo-font-size-s);
+            font-variant-numeric: tabular-nums;
+        }
+        .replay th, .replay td {
+            text-align: right;
+            padding: 2px 4px;
+            white-space: nowrap;
+        }
+        .replay th:first-child, .replay td:first-child {
+            text-align: left;
+        }
+        .replay th {
+            font-weight: 600;
+            color: var(--lumo-secondary-text-color);
+        }
+        .replay td.error {
+            color: var(--lumo-error-text-color, #e53935);
+        }
         .replay-buttons {
             display: flex;
             gap: 2px;
+        }
+        .details.replay {
+            overflow-x: hidden;
         }
         .replay ol, .replay ul {
             list-style: none;
@@ -412,9 +445,13 @@ export class QwcArchitecture extends QwcHotReloadElement {
         this._replayFrame = null;
         this._animatedStep = null;
         this._otel = null;
+        this._traffic = null;
+        this._spanStream = null;
+        this._trafficReload = null;
     }
 
     disconnectedCallback() {
+        this._showTraffic(false);
         this._stopReplay();
         super.disconnectedCallback();
     }
@@ -580,6 +617,9 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     <marker id="arrow-highlight" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                         <path d="M 0 0 L 10 5 L 0 10 z" fill="#ff9800"></path>
                     </marker>
+                    <marker id="arrow-traffic" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto-start-reverse">
+                        <path d="M 0 0 L 10 5 L 0 10 z" fill="#ff9800"></path>
+                    </marker>
                     <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
                         <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#000000" flood-opacity="0.18"></feDropShadow>
                     </filter>
@@ -597,6 +637,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     ${this._renderReplayRoute(layout)}
                     ${layout.nodes.map(n => this._renderNode(n, focus))}
                     ${this._renderReplayMarks(layout)}
+                    ${this._renderTrafficMarks(layout)}
                 </g>
             </svg>`;
     }
@@ -702,18 +743,23 @@ export class QwcArchitecture extends QwcHotReloadElement {
             return nothing;
         }
         const highlight = this._selected && (edge.source === this._selected || edge.target === this._selected);
-        const faded = focus && !(focus.has(edge.source) && focus.has(edge.target));
+        const traffic = this._traffic ? this._traffic.edges.get(`${edge.source}\n${edge.target}`) : null;
+        const faded = this._traffic ? !traffic : focus && !(focus.has(edge.source) && focus.has(edge.target));
         const style = EDGE_STYLES[edge.kind] || EDGE_STYLES.uses;
         const path = edge.points ? this._routePath(edge.points) : this._edgePath(source, target, edge.offset || 0);
         const label = edge.label ? `${edge.kind} ${edge.label}` : edge.kind;
+        const width = traffic
+            ? 1.5 + 5 * Math.log(traffic + 1) / Math.log(this._traffic.maxEdge + 1)
+            : (highlight ? style.width + 1 : style.width);
         return svg`
             <g class="${faded ? 'faded' : ''}">
-                <path class="edge ${highlight ? 'highlight' : ''}" d="${path.d}" stroke-dasharray="${style.dash}"
-                      stroke-width="${highlight ? style.width + 1 : style.width}"
-                      marker-end="url(#${highlight ? 'arrow-highlight' : 'arrow'})">
-                    <title>${label}</title>
+                <path class="edge ${highlight ? 'highlight' : ''} ${traffic ? 'traffic' : ''}" d="${path.d}"
+                      stroke-dasharray="${traffic ? '' : style.dash}" stroke-width="${width}"
+                      marker-end="url(#${traffic ? 'arrow-traffic' : highlight ? 'arrow-highlight' : 'arrow'})">
+                    <title>${traffic ? `${label}: ${traffic} calls` : label}</title>
                 </path>
-                ${(highlight || layout.showLabels) && edge.label ? this._renderEdgeLabel(this._truncate(edge.label, 34), path.mx, path.my) : nothing}
+                ${traffic ? this._renderEdgeLabel(`${traffic}×`, path.mx, path.my)
+                    : (highlight || layout.showLabels) && edge.label ? this._renderEdgeLabel(this._truncate(edge.label, 34), path.mx, path.my) : nothing}
             </g>`;
     }
 
@@ -1219,6 +1265,9 @@ export class QwcArchitecture extends QwcHotReloadElement {
     }
 
     _focusSet(layout) {
+        if (this._traffic) {
+            return new Set([...this._traffic.edgeNodes, ...this._traffic.nodes.keys()]);
+        }
         const step = this._currentStep();
         if (step) {
             const focus = new Set(step.path);
@@ -1266,6 +1315,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
     }
 
     _closeReplay() {
+        this._showTraffic(false);
         this._stopReplay();
         this._replay = null;
     }
@@ -1277,11 +1327,15 @@ export class QwcArchitecture extends QwcHotReloadElement {
         this._otel.getSnapshot().then(response => {
             if (this._replay) {
                 this._replay = { ...this._replay, traces: response.result.traces ?? [] };
+                if (this._traffic) {
+                    this._traffic = this._trafficOf(this._entryTraces());
+                }
             }
         });
     }
 
     _selectTrace(trace) {
+        this._showTraffic(false);
         this._stopReplay();
         this._replay = { ...this._replay, trace, steps: this._stepsOf(trace), index: -1, playing: false };
         this._play();
@@ -1566,16 +1620,15 @@ export class QwcArchitecture extends QwcHotReloadElement {
     }
 
     _renderTraceList() {
-        // Traces that start with an outgoing call, like the schema creation at startup, have no entry point
         const all = this._replay.traces;
-        const traces = all === null ? null : all.filter(t => {
-            const root = this._rootOf(t);
-            return root && root.kind !== 'CLIENT' && root.kind !== 'PRODUCER';
-        });
+        const traces = all === null ? null : this._entryTraces();
         return html`
             <vaadin-button theme="tertiary small" @click=${this._loadTraces}>
                 <vaadin-icon icon="font-awesome-solid:rotate" slot="prefix"></vaadin-icon>${msg('Refresh', { id: 'architecture-replay-refresh' })}
             </vaadin-button>
+            <vaadin-checkbox label="${msg('Show all the traces on the diagram', { id: 'architecture-traffic' })}"
+                .checked=${!!this._traffic} @checked-changed=${e => this._showTraffic(e.detail.value)}></vaadin-checkbox>
+            ${this._renderTrafficTable()}
             ${traces === null ? html`<span class="kind">${msg('Loading the traces', { id: 'architecture-replay-loading' })}</span>`
                 : traces.length === 0 ? html`<span class="kind">${msg('No traces yet. Call the application, then refresh.', { id: 'architecture-replay-empty' })}</span>`
                 : html`<ul>${traces.map(trace => {
@@ -1624,6 +1677,134 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     </li>`)}</ol>`}`;
     }
 
+    /**
+     * @return the traces that start at an entry point. Traces that start with an outgoing call, like the schema
+     *         creation at startup, are left out.
+     */
+    _entryTraces() {
+        return (this._replay && this._replay.traces || []).filter(t => {
+            const root = this._rootOf(t);
+            return root && root.kind !== 'CLIENT' && root.kind !== 'PRODUCER';
+        });
+    }
+
+    /**
+     * Shows or hides the traffic of all the traces on the diagram. While it shows, new spans reload the traces.
+     */
+    _showTraffic(show) {
+        if (this._spanStream) {
+            this._spanStream.cancel();
+            this._spanStream = null;
+        }
+        clearTimeout(this._trafficReload);
+        if (!show || !this._replay || !this._replay.available) {
+            this._traffic = null;
+            this.requestUpdate();
+            return;
+        }
+        this._selected = null;
+        this._traffic = this._trafficOf(this._entryTraces());
+        this._spanStream = this._otel.streamSpans().onNext(() => {
+            clearTimeout(this._trafficReload);
+            this._trafficReload = setTimeout(() => this._loadTraces(), TRAFFIC_RELOAD_MILLIS);
+        });
+        this.requestUpdate();
+    }
+
+    /**
+     * Adds up the replay steps of many traces: the number of calls on each edge, and the durations and errors of
+     * the spans of each node.
+     */
+    _trafficOf(traces) {
+        const edges = new Map();
+        const edgeNodes = new Set();
+        const nodes = new Map();
+        for (const trace of traces) {
+            for (const step of this._stepsOf(trace)) {
+                for (let i = 0; i < step.path.length - 1; i++) {
+                    const a = step.path[i], b = step.path[i + 1];
+                    const edge = this._model.edges.find(e => e.source === a && e.target === b)
+                        || this._model.edges.find(e => e.source === b && e.target === a);
+                    if (edge) {
+                        const key = `${edge.source}\n${edge.target}`;
+                        edges.set(key, (edges.get(key) || 0) + 1);
+                        edgeNodes.add(a);
+                        edgeNodes.add(b);
+                    }
+                }
+                const stats = nodes.get(step.node) || { durations: [], errors: 0 };
+                stats.durations.push(step.duration);
+                stats.errors += step.error ? 1 : 0;
+                nodes.set(step.node, stats);
+            }
+        }
+        for (const stats of nodes.values()) {
+            stats.durations.sort((a, b) => a - b);
+            stats.p50 = this._percentile(stats.durations, 50);
+            stats.p95 = this._percentile(stats.durations, 95);
+        }
+        return {
+            traces: traces.length, edges, edgeNodes, nodes,
+            maxEdge: Math.max(1, ...edges.values()),
+            maxP95: Math.max(0, ...[...nodes.values()].map(n => n.p95))
+        };
+    }
+
+    /**
+     * @return the nearest-rank percentile of sorted values
+     */
+    _percentile(sorted, percent) {
+        return sorted.length === 0 ? 0 : sorted[Math.max(0, Math.ceil(percent / 100 * sorted.length) - 1)];
+    }
+
+    /**
+     * Shows the number of spans and their p50 and p95 durations above each node. The colour goes from orange to
+     * red with the p95 duration.
+     */
+    _renderTrafficMarks(layout) {
+        if (!this._traffic) {
+            return nothing;
+        }
+        return [...this._traffic.nodes.entries()].map(([id, stats]) => {
+            const node = layout.byId.get(id);
+            if (!node) {
+                return nothing;
+            }
+            const text = `${stats.durations.length}× · p50 ${this._formatMillis(stats.p50)} · p95 ${this._formatMillis(stats.p95)}`;
+            const width = text.length * 6.1 + 14;
+            const x = node.x + (node.width || NODE_WIDTH) / 2;
+            const heat = this._traffic.maxP95 > 0 ? stats.p95 / this._traffic.maxP95 : 0;
+            const fill = stats.errors > 0 ? 'var(--lumo-error-color, #e53935)' : `hsl(${36 - 36 * heat}, 95%, ${48 - 6 * heat}%)`;
+            return svg`<rect x="${x - width / 2}" y="${node.y - 22}" width="${width}" height="18" rx="9" fill="${fill}">
+                    <title>${stats.errors > 0 ? `${stats.errors} errors` : ''}</title></rect>
+                <text class="traffic-pill-text" x="${x}" y="${node.y - 9.5}" text-anchor="middle">${text}</text>`;
+        });
+    }
+
+    _renderTrafficTable() {
+        const traffic = this._traffic;
+        if (!traffic) {
+            return nothing;
+        }
+        const rows = [...traffic.nodes.entries()].sort((a, b) => b[1].p95 - a[1].p95);
+        const name = id => {
+            const node = this._model.nodes.find(n => n.id === id);
+            return node ? node.name : id;
+        };
+        return html`
+            <span class="kind">${msg(str`${traffic.traces} traces`, { id: 'architecture-traffic-count' })}</span>
+            ${rows.length === 0 ? nothing : html`<table>
+                <tr><th></th><th>${msg('Calls', { id: 'architecture-traffic-calls' })}</th><th>p50 ms</th><th>p95 ms</th><th>${msg('Errors', { id: 'architecture-traffic-errors' })}</th></tr>
+                ${rows.map(([id, stats]) => html`<tr>
+                    <td><span class="link" @click=${(e) => this._select(e, id)}>${name(id)}</span></td>
+                    <td>${stats.durations.length}</td>
+                    <td>${this._formatNumber(stats.p50)}</td>
+                    <td>${this._formatNumber(stats.p95)}</td>
+                    <td class="${stats.errors > 0 ? 'error' : ''}">${stats.errors}</td>
+                </tr>`)}
+            </table>`}`;
+    }
+
     _rootOf(trace) {
         const ids = new Set(trace.spans.map(s => s.spanId));
         return trace.spans.filter(s => !ids.has(s.parentSpanId))
@@ -1631,7 +1812,11 @@ export class QwcArchitecture extends QwcHotReloadElement {
     }
 
     _formatMillis(millis) {
-        return millis < 10 ? `${millis.toFixed(1)} ms` : `${Math.round(millis)} ms`;
+        return `${this._formatNumber(millis)} ms`;
+    }
+
+    _formatNumber(millis) {
+        return millis < 10 ? millis.toFixed(1) : String(Math.round(millis));
     }
 
     // Interaction
