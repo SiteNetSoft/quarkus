@@ -128,6 +128,13 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- Eclipse Layout Kernel -->
+        <dependency>
+            <groupId>org.mvnpm</groupId>
+            <artifactId>elkjs</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
         <!-- Code editor -->
         <dependency>
             <groupId>org.mvnpm.at.mvnpm</groupId>
