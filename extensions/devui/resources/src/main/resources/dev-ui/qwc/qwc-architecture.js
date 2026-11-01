@@ -1063,6 +1063,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
                 'elk.direction': 'RIGHT',
                 'elk.edgeRouting': 'ORTHOGONAL',
                 'elk.partitioning.activate': 'true',
+                'elk.separateConnectedComponents': 'false',
                 'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
                 'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
                 'elk.layered.spacing.nodeNodeBetweenLayers': '60',
