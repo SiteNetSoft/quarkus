@@ -25,6 +25,20 @@ const LEVEL_COMPONENT = 2;
 const LEVEL_CODE = 3;
 const LEVEL_PATHS = ['context', 'container', 'component', 'component'];
 const CONTAINER_KINDS = ['database', 'cache', 'message-broker'];
+const CORNER_RADIUS = 8;
+
+let elkInstance = null;
+
+/**
+ * Loads the Eclipse Layout Kernel on first use. The bundle is large, so only the component view loads it.
+ */
+async function loadElk() {
+    if (!elkInstance) {
+        await import('elkjs/elk.bundled.js');
+        elkInstance = new window.ELK();
+    }
+    return elkInstance;
+}
 const NETWORK_ENTRY_POINTS = ['rest-endpoint', 'route', 'websocket', 'graphql', 'grpc-service', 'function'];
 
 // The colours of the C4 notation
@@ -318,6 +332,9 @@ export class QwcArchitecture extends QwcHotReloadElement {
         this._drag = null;
         this._layout = null;
         this._fitPending = true;
+        this._elk = null;
+        this._elkPending = null;
+        this._elkFailed = false;
     }
 
     connectedCallback() {
@@ -343,7 +360,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
     }
 
     updated() {
-        if (this._fitPending && this._layout) {
+        if (this._fitPending && this._layout && !this._layout.pending) {
             this._fitPending = false;
             this._fit();
         }
@@ -598,7 +615,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
         const highlight = this._selected && (edge.source === this._selected || edge.target === this._selected);
         const faded = focus && !(focus.has(edge.source) && focus.has(edge.target));
         const style = EDGE_STYLES[edge.kind] || EDGE_STYLES.uses;
-        const path = this._edgePath(source, target, edge.offset || 0);
+        const path = edge.points ? this._routePath(edge.points) : this._edgePath(source, target, edge.offset || 0);
         const label = edge.label ? `${edge.kind} ${edge.label}` : edge.kind;
         return svg`
             <g class="${faded ? 'faded' : ''}">
@@ -655,6 +672,41 @@ export class QwcArchitecture extends QwcHotReloadElement {
         const mx = 0.125 * sx + 0.375 * c1[0] + 0.375 * c2[0] + 0.125 * tx;
         const my = 0.125 * sy + 0.375 * c1[1] + 0.375 * c2[1] + 0.125 * ty;
         return { d, mx, my };
+    }
+
+    /**
+     * Draws an orthogonal route through its bend points, with rounded corners.
+     */
+    _routePath(points) {
+        let d = `M ${points[0].x} ${points[0].y}`;
+        for (let i = 1; i < points.length - 1; i++) {
+            const [p, c, n] = [points[i - 1], points[i], points[i + 1]];
+            const r = Math.min(CORNER_RADIUS, Math.hypot(c.x - p.x, c.y - p.y) / 2, Math.hypot(n.x - c.x, n.y - c.y) / 2);
+            const before = this._towards(c, p, r), after = this._towards(c, n, r);
+            d += ` L ${before.x} ${before.y} Q ${c.x} ${c.y}, ${after.x} ${after.y}`;
+        }
+        const last = points[points.length - 1];
+        d += ` L ${last.x} ${last.y}`;
+
+        // The label sits halfway along the route
+        const lengths = points.slice(1).map((pt, i) => Math.hypot(pt.x - points[i].x, pt.y - points[i].y));
+        let half = lengths.reduce((a, b) => a + b, 0) / 2;
+        let mx = points[0].x, my = points[0].y;
+        for (let i = 0; i < lengths.length; i++) {
+            if (half <= lengths[i] || i === lengths.length - 1) {
+                const t = lengths[i] === 0 ? 0 : Math.min(1, half / lengths[i]);
+                mx = points[i].x + (points[i + 1].x - points[i].x) * t;
+                my = points[i].y + (points[i + 1].y - points[i].y) * t;
+                break;
+            }
+            half -= lengths[i];
+        }
+        return { d, mx, my };
+    }
+
+    _towards(from, to, distance) {
+        const length = Math.hypot(to.x - from.x, to.y - from.y);
+        return length === 0 ? from : { x: from.x + (to.x - from.x) * distance / length, y: from.y + (to.y - from.y) * distance / length };
     }
 
     _renderLegend() {
@@ -922,10 +974,17 @@ export class QwcArchitecture extends QwcHotReloadElement {
             }
         }
 
+        const key = JSON.stringify([columns.map(c => c.map(n => n.id)), edges.map(e => [e.source, e.target])]);
+        const elk = this._elk && this._elk.key === key ? this._elk : null;
+        if (!elk) {
+            this._runElk(key, columns, edges);
+        }
+
         const tallest = Math.max(...columns.map(c => c.length));
         const nodes = [];
         const titles = [];
         const bands = [];
+        const top = PADDING + 32;
         columns.forEach((column, ci) => {
             const x = PADDING + ci * (NODE_WIDTH + COLUMN_GAP);
             const offset = (tallest - column.length) * (NODE_HEIGHT + ROW_GAP) / 2;
@@ -944,6 +1003,31 @@ export class QwcArchitecture extends QwcHotReloadElement {
             });
         });
 
+        let routed = edges;
+        let contentHeight = tallest * (NODE_HEIGHT + ROW_GAP);
+        if (elk) {
+            // Move the nodes to the ELK positions, and fit the bands and titles to the columns that ELK made
+            for (const node of nodes) {
+                const position = elk.nodes.get(node.id);
+                node.x = PADDING + position.x;
+                node.y = top + position.y;
+            }
+            titles.length = 0;
+            bands.length = 0;
+            contentHeight = elk.height + ROW_GAP;
+            columns.forEach(column => {
+                const placed = nodes.filter(n => column.some(c => c.id === n.id));
+                const left = Math.min(...placed.map(n => n.x));
+                const right = Math.max(...placed.map(n => n.x + NODE_WIDTH));
+                titles.push({ x: (left + right) / 2, y: PADDING + 16, text: this._layerTitle(column[0].layer) });
+                bands.push({ x: left - 14, y: PADDING, width: right - left + 28, height: contentHeight + 40 });
+            });
+            routed = edges.map((edge, i) => {
+                const points = elk.routes.get(i);
+                return points ? { ...edge, points: points.map(p => ({ x: PADDING + p.x, y: top + p.y })) } : edge;
+            });
+        }
+
         // The application boundary surrounds every column except the external systems
         const inside = nodes.filter(n => model.nodes.find(m => m.id === n.id).layer !== 'external');
         let boundary = null;
@@ -952,18 +1036,85 @@ export class QwcArchitecture extends QwcHotReloadElement {
             const maxX = Math.max(...inside.map(n => n.x)) + NODE_WIDTH + 30;
             boundary = {
                 x: minX, y: PADDING - 34, width: maxX - minX,
-                height: tallest * (NODE_HEIGHT + ROW_GAP) + 92,
+                height: contentHeight + 92,
                 title: `${model.application} [Container: Quarkus${model.quarkusVersion ? ' ' + model.quarkusVersion : ''}]`
             };
         }
-        return this._finishLayout(nodes, edges, titles, boundary, false, bands);
+        const layout = this._finishLayout(nodes, routed, titles, boundary, false, bands);
+        layout.pending = !elk && !this._elkFailed;
+        return layout;
+    }
+
+    /**
+     * Lays out the component view with ELK: layered from left to right, one partition for each layer, and
+     * orthogonal edges that go around the nodes. The page shows the simple column layout until ELK is done, and
+     * keeps it if ELK cannot load.
+     */
+    _runElk(key, columns, edges) {
+        if (this._elkPending === key || this._elkFailed) {
+            return;
+        }
+        this._elkPending = key;
+        const ids = new Set(columns.flat().map(n => n.id));
+        const graph = {
+            id: 'root',
+            layoutOptions: {
+                'elk.algorithm': 'layered',
+                'elk.direction': 'RIGHT',
+                'elk.edgeRouting': 'ORTHOGONAL',
+                'elk.partitioning.activate': 'true',
+                'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
+                'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
+                'elk.layered.spacing.nodeNodeBetweenLayers': '60',
+                'elk.layered.spacing.edgeNodeBetweenLayers': '16',
+                'elk.layered.spacing.edgeEdgeBetweenLayers': '12',
+                'elk.spacing.nodeNode': String(ROW_GAP),
+                'elk.spacing.edgeNode': '20',
+                'elk.spacing.edgeEdge': '12',
+                'elk.padding': '[top=0,left=0,bottom=0,right=0]'
+            },
+            children: columns.flat().map(n => ({
+                id: n.id, width: NODE_WIDTH, height: NODE_HEIGHT,
+                layoutOptions: { 'elk.partitioning.partition': String(LAYERS.indexOf(n.layer)) }
+            })),
+            edges: edges.map((e, i) => ({ id: `e${i}`, sources: [e.source], targets: [e.target] }))
+                .filter((e, i) => edges[i].source !== edges[i].target && ids.has(edges[i].source) && ids.has(edges[i].target))
+        };
+        loadElk()
+            .then(elk => elk.layout(graph))
+            .then(result => {
+                if (this._elkPending !== key) {
+                    return;
+                }
+                const routes = new Map();
+                for (const edge of result.edges || []) {
+                    const section = edge.sections && edge.sections[0];
+                    if (section) {
+                        routes.set(Number(edge.id.substring(1)), [section.startPoint, ...(section.bendPoints || []), section.endPoint]);
+                    }
+                }
+                this._elk = {
+                    key, routes, height: result.height,
+                    nodes: new Map(result.children.map(c => [c.id, { x: c.x, y: c.y }]))
+                };
+                this._elkPending = null;
+                this.requestUpdate();
+            })
+            .catch(error => {
+                console.warn('Architecture: ELK layout failed, keeping the column layout', error);
+                this._elkFailed = true;
+                this._elkPending = null;
+                this.requestUpdate();
+            });
     }
 
     _finishLayout(nodes, edges, titles, boundary, showLabels, bands) {
         nodes.forEach(n => this._decorate(n));
         const byId = new Map(nodes.map(n => [n.id, n]));
-        const width = Math.max(...nodes.map(n => n.x + (n.width || NODE_WIDTH))) + PADDING;
-        const height = Math.max(...nodes.map(n => n.y + (n.height || NODE_HEIGHT)), boundary ? boundary.y + boundary.height : 0) + PADDING;
+        const points = edges.flatMap(e => e.points || []);
+        const width = Math.max(...nodes.map(n => n.x + (n.width || NODE_WIDTH)), ...points.map(p => p.x)) + PADDING;
+        const height = Math.max(...nodes.map(n => n.y + (n.height || NODE_HEIGHT)), ...points.map(p => p.y),
+            boundary ? boundary.y + boundary.height : 0) + PADDING;
         return { nodes, edges, titles, boundary, byId, width, height, showLabels, bands };
     }
 
