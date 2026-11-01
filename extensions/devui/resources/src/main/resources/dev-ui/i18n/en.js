@@ -368,6 +368,10 @@ export const templates = {
     'architecture-replay-play': 'Play',
     'architecture-replay-next': 'Next step',
     'architecture-replay-no-steps': 'No span of this trace matches a component.',
+    'architecture-traffic': 'Show all the traces on the diagram',
+    'architecture-traffic-count': str`${0} traces`,
+    'architecture-traffic-calls': 'Calls',
+    'architecture-traffic-errors': 'Errors',
     'architecture-replay-hidden': str`${0} traces without an entry point are hidden.`,
 
     'dependencies-show-path-to': 'Show path to...',
