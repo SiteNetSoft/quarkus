@@ -21,6 +21,12 @@ public final class ArchitectureExporter {
     private static final String USER_ID = "user";
     private static final String SYSTEM_ID = "system";
 
+    /**
+     * Words of the Mermaid flowchart syntax that cannot be node ids.
+     */
+    private static final Set<String> MERMAID_KEYWORDS = Set.of("end", "subgraph", "graph", "flowchart", "direction",
+            "style", "linkStyle", "classDef", "class", "click", "call", "href", "default");
+
     private ArchitectureExporter() {
     }
 
@@ -283,6 +289,7 @@ public final class ArchitectureExporter {
         Set<String> taken = new HashSet<>(ids.values());
         taken.add(USER_ID);
         taken.add(SYSTEM_ID);
+        taken.addAll(MERMAID_KEYWORDS);
         int counter = 0;
         for (Node node : model.nodes()) {
             String base = node.id().replaceAll("[^A-Za-z0-9]", "_");
@@ -299,7 +306,12 @@ public final class ArchitectureExporter {
         return value == null ? "" : value.replace("\"", "'");
     }
 
+    /**
+     * Writes a value with Mermaid entity codes for the characters that Mermaid reads as markup: {@code #} starts an
+     * entity code, {@code "} ends the label, and {@code <} and {@code >} make an HTML tag.
+     */
     private static String mermaidText(String value) {
-        return value == null ? "" : value.replace("\"", "#quot;");
+        return value == null ? ""
+                : value.replace("#", "#35;").replace("\"", "#quot;").replace("<", "#lt;").replace(">", "#gt;");
     }
 }

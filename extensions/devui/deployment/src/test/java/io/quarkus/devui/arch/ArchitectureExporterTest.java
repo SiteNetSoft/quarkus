@@ -88,4 +88,22 @@ public class ArchitectureExporterTest {
                 .contains("Rel(app, http_payments_8080, \"calls HTTP\")")
                 .doesNotContain("OrderResource");
     }
+
+    @Test
+    public void testMermaidEncodesMarkupAndAvoidsKeywords() {
+        ArchitectureModel model = new ArchitectureModel("shop <v2>", "1.0", "3.99.0", List.of(
+                new Node("end", "end", "rest-endpoint", Node.LAYER_ENTRY, "Jakarta REST", "end", List.of(), false),
+                new Node("org.acme.Repo", "Repo<Order>", "repository", Node.LAYER_DATA, "Repository", "org.acme.Repo",
+                        List.of(), false)),
+                List.of(new Edge("end", "org.acme.Repo", "publishes", "orders #1;")));
+
+        String mermaid = ArchitectureExporter.toMermaid(model);
+
+        assertThat(mermaid)
+                .contains("subgraph app[\"shop #lt;v2#gt;\"]")
+                .contains("end_1([\"end<br/><small>rest-endpoint</small>\"])")
+                .contains("org_acme_Repo[\"Repo#lt;Order#gt;<br/>")
+                .contains("end_1 -->|\"publishes orders #35;1;\"| org_acme_Repo")
+                .doesNotContain(" end(");
+    }
 }
