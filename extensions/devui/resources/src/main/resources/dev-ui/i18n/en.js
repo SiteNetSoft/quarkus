@@ -384,6 +384,11 @@ export const templates = {
     'architecture-import-other-service': str`No span comes from the service ${0}. The page shows the spans of: ${1}.`,
     'architecture-import-left-out': str`${0} spans of other services are left out.`,
     'architecture-import-version': str`The spans come from version ${0}, and the application has version ${1}. Some spans can match no component.`,
+    'architecture-metrics': 'Show metric values on the diagram',
+    'architecture-metrics-empty': 'The application has no metric for the nodes of the diagram yet.',
+    'architecture-metrics-series': str`${0} series`,
+    'architecture-metrics-title': str`${0}: ${1} series`,
+    'architecture-metrics-title-many': str`${0}: ${1} series. The metrics catalog has no total for them.`,
 
     'dependencies-show-path-to': 'Show path to...',
     'dependencies-simple-description': 'Simple description',

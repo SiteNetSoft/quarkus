@@ -38,6 +38,42 @@ const TRAFFIC_RELOAD_MILLIS = 1000;
 const OTLP_SPAN_KINDS = ['INTERNAL', 'INTERNAL', 'SERVER', 'CLIENT', 'PRODUCER', 'CONSUMER'];
 const OTLP_STATUS_CODES = ['UNSET', 'OK', 'ERROR'];
 const NO_PARENT_SPAN = '0000000000000000';
+const METRICS_NAMESPACE = 'devui-observability';
+const METRICS_RELOAD_MILLIS = 5000;
+const METRIC_LINE_HEIGHT = 14;
+// For these types, the value in the metrics catalog is the number of recordings, not an amount in the unit
+const METRIC_COUNT_TYPES = ['TIMER', 'SUMMARY', 'HISTOGRAM'];
+
+/**
+ * The metrics that the diagram shows. A rule names the node of the metric: the application, or the only node of a
+ * kind. The names are the Micrometer names and the OpenTelemetry names of the same metric, and the first name that
+ * the metrics catalog holds is used.
+ *
+ * The catalog has one value for each metric name, not one for each route, client or method. So a rule matches
+ * only a node that stands for the whole metric. The nodes of one class, like a REST endpoint or a REST client,
+ * get no value: that needs the series of the metric, and the series need a selection that the pages share.
+ */
+const NODE_METRICS = [
+    { node: 'app', label: 'requests', names: ['http.server.requests', 'http.server.request.duration'] },
+    { node: 'app', label: 'active', names: ['http.server.active.requests'] },
+    { kind: 'http-service', label: 'requests', names: ['http.client.requests', 'http.client.request.duration'] },
+    { kind: 'database', label: 'active', names: ['agroal.active.count'] },
+    { kind: 'database', label: 'max used', names: ['agroal.max.used.count'] },
+    { kind: 'database', label: 'awaiting', names: ['agroal.awaiting.count'] },
+    { kind: 'database', label: 'connections', names: ['db.client.connections.usage'] },
+    { kind: 'message-broker', technology: 'kafka', label: 'consumed', names: ['kafka.consumer.fetch.manager.records.consumed.total'] },
+    { kind: 'message-broker', technology: 'kafka', label: 'lag max', names: ['kafka.consumer.fetch.manager.records.lag.max'] },
+    { kind: 'message-broker', technology: 'kafka', label: 'sent', names: ['kafka.producer.record.send.total'] },
+    { kind: 'scheduled', label: 'executions', names: ['scheduler.executions', 'scheduled.methods'] }
+];
+
+/**
+ * @return the metric name in one format for Micrometer, OpenTelemetry and Prometheus: lower case, dots between the
+ *         words, and no total or seconds suffix
+ */
+function metricKey(name) {
+    return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.|\.$/g, '').replace(/\.(total|seconds)$/, '');
+}
 
 /**
  * Reads the spans of an OTLP JSON file. The file holds one export request, or one request per line as the file
@@ -468,6 +504,15 @@ export class QwcArchitecture extends QwcHotReloadElement {
             font-size: 10.5px;
             font-weight: 700;
         }
+        .metric-pill {
+            fill: var(--lumo-base-color);
+            stroke: var(--lumo-contrast-30pct);
+        }
+        .metric-pill-text {
+            fill: var(--lumo-body-text-color);
+            font-size: 10.5px;
+            font-variant-numeric: tabular-nums;
+        }
         .replay table {
             border-collapse: collapse;
             font-size: var(--lumo-font-size-s);
@@ -550,7 +595,8 @@ export class QwcArchitecture extends QwcHotReloadElement {
         _selected: { state: true },
         _view: { state: true },
         _dragging: { state: true },
-        _replay: { state: true }
+        _replay: { state: true },
+        _metrics: { state: true }
     };
 
     constructor() {
@@ -578,9 +624,13 @@ export class QwcArchitecture extends QwcHotReloadElement {
         this._traffic = null;
         this._spanStream = null;
         this._trafficReload = null;
+        this._metrics = null;
+        this._metricsRpc = null;
+        this._metricsTimer = null;
     }
 
     disconnectedCallback() {
+        this._showMetrics(false);
         this._showTraffic(false);
         this._stopReplay();
         super.disconnectedCallback();
@@ -768,6 +818,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     ${layout.nodes.map(n => this._renderNode(n, focus))}
                     ${this._renderReplayMarks(layout)}
                     ${this._renderTrafficMarks(layout)}
+                    ${this._renderMetricMarks(layout)}
                 </g>
             </svg>`;
     }
@@ -1445,6 +1496,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
     }
 
     _closeReplay() {
+        this._showMetrics(false);
         this._showTraffic(false);
         this._stopReplay();
         this._replay = null;
@@ -1505,6 +1557,8 @@ export class QwcArchitecture extends QwcHotReloadElement {
             warnings.push(msg(str`The spans come from version ${versions.join(', ')}, and the application has version ${this._model.version}. Some spans can match no component.`, { id: 'architecture-import-version' }));
         }
         const traffic = !!this._traffic;
+        // The metrics come from the running application, not from the file
+        this._showMetrics(false);
         this._showTraffic(false);
         this._stopReplay();
         this._replay = { ...this._replay, traces: tracesOfSpans(kept), file: { name: file.name, warnings }, trace: null, steps: [], index: -1, playing: false };
@@ -1805,7 +1859,8 @@ export class QwcArchitecture extends QwcHotReloadElement {
         const replay = this._replay;
         if (!replay.available && !replay.file) {
             return html`<span class="kind">${msg('Add the OpenTelemetry extension (quarkus-opentelemetry) to replay the traces of the application.', { id: 'architecture-replay-no-otel' })}</span>
-                ${this._renderImportButton()}`;
+                ${this._renderImportButton()}
+                ${this._renderMetricsToggle()}`;
         }
         const all = replay.traces === null ? null : this._entryTraces();
         const traces = all === null ? null : this._visibleTraces();
@@ -1827,6 +1882,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
             <vaadin-checkbox label="${msg('Show all the traces on the diagram', { id: 'architecture-traffic' })}"
                 .checked=${!!this._traffic} @checked-changed=${e => this._showTraffic(e.detail.value)}></vaadin-checkbox>
             ${this._renderTrafficTable()}
+            ${this._renderMetricsToggle()}
             ${traces === null ? html`<span class="kind">${msg('Loading the traces', { id: 'architecture-replay-loading' })}</span>`
                 : traces.length === 0 ? html`<span class="kind">${replay.filter
                     ? msg('No trace matches the filter.', { id: 'architecture-replay-no-match' })
@@ -2030,6 +2086,176 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     <td class="${stats.errors > 0 ? 'error' : ''}">${stats.errors}</td>
                 </tr>`)}
             </table>`}`;
+    }
+
+    // Metrics
+
+    _renderMetricsToggle() {
+        if (this._replay.file || !jsonRPCMethods.includes(`${METRICS_NAMESPACE}_getCatalog`)) {
+            return nothing;
+        }
+        return html`<vaadin-checkbox label="${msg('Show metric values on the diagram', { id: 'architecture-metrics' })}"
+                .checked=${!!this._metrics} @checked-changed=${e => this._showMetrics(e.detail.value)}></vaadin-checkbox>
+            ${this._metrics && this._metrics.loaded && this._metrics.nodes.size === 0
+                ? html`<span class="kind">${msg('The application has no metric for the nodes of the diagram yet.', { id: 'architecture-metrics-empty' })}</span>`
+                : nothing}`;
+    }
+
+    /**
+     * Shows or hides the metric values on the diagram. While they show, the page reads the metrics catalog again
+     * at the sample interval of the metrics store. The page does not change the metric selection of the store.
+     */
+    _showMetrics(show) {
+        if (show && this._metrics) {
+            return;
+        }
+        clearTimeout(this._metricsTimer);
+        this._metricsTimer = null;
+        if (!show) {
+            this._metrics = null;
+            return;
+        }
+        this._metrics = { nodes: new Map(), loaded: false, signature: '' };
+        this._loadMetrics();
+    }
+
+    _loadMetrics() {
+        if (!this._metricsRpc) {
+            this._metricsRpc = new JsonRpc(METRICS_NAMESPACE);
+        }
+        const again = millis => {
+            clearTimeout(this._metricsTimer);
+            this._metricsTimer = this._metrics ? setTimeout(() => this._loadMetrics(), millis) : null;
+        };
+        this._metricsRpc.getCatalog().then(response => {
+            if (!this._metrics) {
+                return;
+            }
+            const catalog = (response && response.result) ?? {};
+            const metrics = this._metricsOf(catalog);
+            if (!this._metrics.loaded || metrics.signature !== this._metrics.signature) {
+                this._metrics = metrics;
+            }
+            again(catalog.sampleIntervalMillis > 0 ? Math.max(1000, catalog.sampleIntervalMillis) : METRICS_RELOAD_MILLIS);
+        }, () => again(METRICS_RELOAD_MILLIS));
+    }
+
+    /**
+     * Finds the metrics of the catalog that belong to a node of the model.
+     *
+     * @return for each node id, the label and the catalog entry of its metrics
+     */
+    _metricsOf(catalog) {
+        const byKey = new Map();
+        for (const group of catalog.groups || []) {
+            for (const metric of group.metrics || []) {
+                const key = metricKey(metric.name);
+                if (!byKey.has(key)) {
+                    byKey.set(key, metric);
+                }
+            }
+        }
+        const nodes = new Map();
+        for (const rule of NODE_METRICS) {
+            const metric = rule.names.map(name => byKey.get(metricKey(name))).find(m => m);
+            const id = metric ? this._metricNode(rule) : null;
+            if (id) {
+                (nodes.get(id) || nodes.set(id, []).get(id)).push({ label: rule.label, metric });
+            }
+        }
+        const signature = JSON.stringify([...nodes.entries()].map(([id, rows]) =>
+            [id, rows.map(row => [row.metric.name, row.metric.lastValue, row.metric.seriesCount, row.metric.unit])]));
+        return { nodes, loaded: true, signature };
+    }
+
+    /**
+     * @return the id of the node of a metric rule, or null when the model has no node or many nodes for it
+     */
+    _metricNode(rule) {
+        if (rule.node) {
+            return rule.node;
+        }
+        const nodes = this._model.nodes.filter(n => n.kind === rule.kind
+            && (!rule.technology || (n.technology || '').toLowerCase().includes(rule.technology)));
+        return nodes.length === 1 ? nodes[0].id : null;
+    }
+
+    /**
+     * Shows the metric values under each node, one line for each metric. The traffic pill and the replay pill sit
+     * above the node. When the place under the node is not free, the values go to the right of the node.
+     */
+    _renderMetricMarks(layout) {
+        if (!this._metrics) {
+            return nothing;
+        }
+        return [...this._metrics.nodes.entries()].map(([id, rows]) => {
+            const node = layout.byId.get(id);
+            if (!node) {
+                return nothing;
+            }
+            const texts = rows.map(row => `${row.label} ${this._metricText(row.metric)}`);
+            const width = Math.max(...texts.map(t => t.length)) * 5.9 + 14;
+            const height = texts.length * METRIC_LINE_HEIGHT + 6;
+            const w = node.width || NODE_WIDTH;
+            const h = node.height || NODE_HEIGHT;
+            let x = node.x + (w - width) / 2;
+            let y = node.y + h + 4;
+            if (this._metricPlaceTaken(layout, node, x, y, width, height)) {
+                x = node.x + w + 6;
+                y = node.y + (h - height) / 2;
+            }
+            return svg`<rect class="metric-pill" x="${x}" y="${y}" width="${width}" height="${height}" rx="9"></rect>
+                ${rows.map((row, i) => svg`<text class="metric-pill-text" x="${x + 7}" y="${y + 13.5 + i * METRIC_LINE_HEIGHT}"><title>${this._metricTitle(row.metric)}</title>${texts[i]}</text>`)}`;
+        });
+    }
+
+    /**
+     * @return true when the rectangle covers another node, or the pill above another node
+     */
+    _metricPlaceTaken(layout, node, x, y, width, height) {
+        const replay = this._replay;
+        const replayed = replay && replay.index >= 0 ? replay.steps.slice(0, replay.index + 1).map(step => step.node) : [];
+        return layout.nodes.some(other => {
+            if (other.id === node.id) {
+                return false;
+            }
+            const pill = this._traffic && this._traffic.nodes.has(other.id) || replayed.includes(other.id);
+            const top = other.y - (pill ? 24 : 0);
+            return x < other.x + (other.width || NODE_WIDTH) && x + width > other.x
+                && y < other.y + (other.height || NODE_HEIGHT) && y + height > top;
+        });
+    }
+
+    /**
+     * @return the value and the unit of a metric. The catalog holds the last value of only one series of a metric.
+     *         So a metric with many series shows the number of series and no value.
+     */
+    _metricText(metric) {
+        const series = Number(metric.seriesCount) || 0;
+        if (series > 1) {
+            return msg(str`${series} series`, { id: 'architecture-metrics-series' });
+        }
+        if (typeof metric.lastValue !== 'number' || !Number.isFinite(metric.lastValue)) {
+            return '–';
+        }
+        const unit = METRIC_COUNT_TYPES.includes(metric.type) ? '' : String(metric.unit || '').replace(/[{}]/g, '');
+        return `${this._formatMetric(metric.lastValue)}${unit && unit !== '1' ? ' ' + unit : ''}`;
+    }
+
+    _metricTitle(metric) {
+        const series = Number(metric.seriesCount) || 0;
+        return series > 1
+            ? msg(str`${metric.name}: ${series} series. The metrics catalog has no total for them.`, { id: 'architecture-metrics-title-many' })
+            : msg(str`${metric.name}: ${series} series`, { id: 'architecture-metrics-title' });
+    }
+
+    _formatMetric(value) {
+        for (const [limit, suffix] of [[1e9, 'G'], [1e6, 'M'], [1e3, 'k']]) {
+            if (Math.abs(value) >= limit) {
+                return `${(value / limit).toFixed(1)}${suffix}`;
+            }
+        }
+        return Number.isInteger(value) ? String(value) : value.toFixed(Math.abs(value) < 10 ? 2 : 1);
     }
 
     _rootOf(trace) {
