@@ -41,6 +41,13 @@ const NO_PARENT_SPAN = '0000000000000000';
 const METRICS_NAMESPACE = 'devui-observability';
 const METRICS_RELOAD_MILLIS = 5000;
 const METRIC_LINE_HEIGHT = 14;
+// Isometric view: the floor is turned by 30 degrees, the bands and the boundary become slabs, the nodes blocks
+const ISO_COS = Math.cos(Math.PI / 6);
+const ISO_SIN = Math.sin(Math.PI / 6);
+const ISO_SLAB_DEPTH = 10;
+const ISO_BLOCK_DEPTH = 18;
+const ISO_STORAGE_KEY = 'quarkus-architecture-iso';
+const ISO_LABELS_STORAGE_KEY = 'quarkus-architecture-iso-labels';
 // For these types, the value in the metrics catalog is the number of recordings, not an amount in the unit
 const METRIC_COUNT_TYPES = ['TIMER', 'SUMMARY', 'HISTOGRAM'];
 
@@ -333,6 +340,20 @@ export class QwcArchitecture extends QwcHotReloadElement {
             font-weight: 700;
             letter-spacing: 0.04em;
         }
+        .iso-face {
+            stroke: rgba(0, 0, 0, 0.12);
+            stroke-width: 0.8;
+        }
+        .iso-slab {
+            stroke: var(--lumo-contrast-20pct);
+        }
+        .iso-upright text, text.iso-upright {
+            fill: var(--lumo-body-text-color);
+            paint-order: stroke;
+            stroke: var(--lumo-base-color);
+            stroke-width: 3px;
+            stroke-linejoin: round;
+        }
         .band {
             fill: var(--lumo-contrast-5pct);
         }
@@ -609,6 +630,8 @@ export class QwcArchitecture extends QwcHotReloadElement {
         this._layers = [...LAYERS];
         this._selected = null;
         this._view = { x: 0, y: 0, scale: 1 };
+        this._iso = this._storedFlag(ISO_STORAGE_KEY, false);
+        this._isoUprightLabels = this._storedFlag(ISO_LABELS_STORAGE_KEY, true);
         this._dragging = false;
         this._drag = null;
         this._layout = null;
@@ -769,6 +792,12 @@ export class QwcArchitecture extends QwcHotReloadElement {
                 <vaadin-button theme="icon tertiary" title="${msg('Fit to screen', { id: 'architecture-fit' })}" @click=${this._fit}>
                     <vaadin-icon icon="font-awesome-solid:expand"></vaadin-icon>
                 </vaadin-button>
+                <vaadin-button theme="icon tertiary ${this._iso ? 'primary' : ''}" title="${msg('Isometric view', { id: 'architecture-iso' })}" @click=${this._toggleIso}>
+                    <vaadin-icon icon="font-awesome-solid:cube"></vaadin-icon>
+                </vaadin-button>
+                ${this._iso ? html`<vaadin-button theme="icon tertiary ${this._isoUprightLabels ? 'primary' : ''}" title="${msg('Upright labels', { id: 'architecture-iso-labels' })}" @click=${this._toggleIsoLabels}>
+                    <vaadin-icon icon="font-awesome-solid:font"></vaadin-icon>
+                </vaadin-button>` : nothing}
                 <vaadin-button theme="tertiary small" title="${msg('Copy as PlantUML', { id: 'architecture-copy-plantuml' })}" @click=${() => this._copy('plantuml', architecturePlantUml, 'PlantUML')}>
                     <vaadin-icon icon="font-awesome-solid:copy" slot="prefix"></vaadin-icon>PlantUML
                 </vaadin-button>
@@ -808,6 +837,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     </filter>
                 </defs>
                 <g transform="translate(${x} ${y}) scale(${scale})">
+                    ${this._iso ? this._renderIsoScene(layout, focus) : svg`
                     ${layout.boundary ? svg`
                         <rect class="boundary" x="${layout.boundary.x}" y="${layout.boundary.y}" width="${layout.boundary.width}" height="${layout.boundary.height}" rx="14"></rect>
                         <text class="boundary-title" x="${layout.boundary.x + 14}" y="${layout.boundary.y + 20}">${layout.boundary.title}</text>` : nothing}
@@ -818,9 +848,223 @@ export class QwcArchitecture extends QwcHotReloadElement {
                     ${layout.nodes.map(n => this._renderNode(n, focus))}
                     ${this._renderReplayMarks(layout)}
                     ${this._renderTrafficMarks(layout)}
-                    ${this._renderMetricMarks(layout)}
+                    ${this._renderMetricMarks(layout)}`}
                 </g>
             </svg>`;
+    }
+
+    _storedFlag(key, fallback) {
+        try {
+            const value = localStorage.getItem(key);
+            return value === null ? fallback : value === 'true';
+        } catch (e) {
+            return fallback;
+        }
+    }
+
+    _storeFlag(key, value) {
+        try {
+            localStorage.setItem(key, String(value));
+        } catch (e) {
+            // private mode, nothing to keep
+        }
+    }
+
+    _toggleIso() {
+        this._iso = !this._iso;
+        this._storeFlag(ISO_STORAGE_KEY, this._iso);
+        this._fit();
+        this.requestUpdate();
+    }
+
+    _toggleIsoLabels() {
+        this._isoUprightLabels = !this._isoUprightLabels;
+        this._storeFlag(ISO_LABELS_STORAGE_KEY, this._isoUprightLabels);
+        this.requestUpdate();
+    }
+
+    /**
+     * Maps a point of the floor to the screen: the x axis of the floor runs down to the right, the y axis down to the left.
+     */
+    _isoPoint(x, y) {
+        return { x: (x - y) * ISO_COS, y: (x + y) * ISO_SIN };
+    }
+
+    /**
+     * The transform of a group whose content is drawn in floor coordinates, raised by lift pixels.
+     */
+    _isoTransform(lift) {
+        return `translate(0 ${-lift}) matrix(${ISO_COS} ${ISO_SIN} ${-ISO_COS} ${ISO_SIN} 0 0)`;
+    }
+
+    /**
+     * The slabs of the scene: the boundary and the layer bands, outer ones first.
+     */
+    _isoSlabs(layout) {
+        const slabs = [];
+        if (layout.boundary) {
+            slabs.push({ ...layout.boundary, cls: 'boundary' });
+        }
+        for (const band of layout.bands || []) {
+            slabs.push({ ...band, cls: 'band' });
+        }
+        for (const slab of slabs) {
+            slab.level = slabs.filter(other => other !== slab && this._isoContains(other, slab)).length;
+        }
+        return slabs.sort((a, b) => a.level - b.level || (a.x + a.y) - (b.x + b.y));
+    }
+
+    _isoContains(outer, box) {
+        return outer.x <= box.x && outer.y <= box.y
+            && outer.x + outer.width >= box.x + box.width && outer.y + outer.height >= box.y + box.height
+            && outer.width * outer.height > box.width * box.height;
+    }
+
+    /**
+     * How high a floor point stands: one slab thickness for each slab under it.
+     */
+    _isoLiftAt(slabs, x, y) {
+        return slabs.filter(s => s.x <= x && x <= s.x + s.width && s.y <= y && y <= s.y + s.height).length * ISO_SLAB_DEPTH;
+    }
+
+    _isoNodeLift(slabs, node) {
+        return this._isoLiftAt(slabs, node.x + (node.width || NODE_WIDTH) / 2, node.y + (node.height || NODE_HEIGHT) / 2);
+    }
+
+    /**
+     * An edge keeps one height with its arrowhead and label: the higher of its two ends.
+     */
+    _isoEdgeLift(slabs, layout, edge) {
+        const source = layout.byId.get(edge.source), target = layout.byId.get(edge.target);
+        return Math.max(source ? this._isoNodeLift(slabs, source) : 0, target ? this._isoNodeLift(slabs, target) : 0);
+    }
+
+    /**
+     * The two visible side faces of a box standing on the floor, in screen coordinates. The face turned to the
+     * right catches more light than the one turned to the viewer.
+     */
+    _isoFaces(x, y, w, h, depth, lift, fill, cls) {
+        const corners = [this._isoPoint(x, y), this._isoPoint(x + w, y), this._isoPoint(x + w, y + h), this._isoPoint(x, y + h)];
+        const face = (a, b, shade) => {
+            const points = `${a.x},${a.y - lift} ${b.x},${b.y - lift} ${b.x},${b.y - lift - depth} ${a.x},${a.y - lift - depth}`;
+            return svg`<polygon class="iso-face ${cls}" points="${points}" style="fill: color-mix(in srgb, ${fill}, black ${shade}%)"></polygon>`;
+        };
+        return svg`${face(corners[1], corners[2], 18)}${face(corners[2], corners[3], 34)}`;
+    }
+
+    /**
+     * The isometric scene: slabs, then the edges on their floors, then the blocks from back to front, then the marks.
+     */
+    _renderIsoScene(layout, focus) {
+        const slabs = this._isoSlabs(layout);
+        const nodes = layout.nodes.map(node => ({ node, lift: this._isoNodeLift(slabs, node) }))
+            .sort((a, b) => a.lift - b.lift
+                || (a.node.x + (a.node.width || NODE_WIDTH) + a.node.y + (a.node.height || NODE_HEIGHT))
+                - (b.node.x + (b.node.width || NODE_WIDTH) + b.node.y + (b.node.height || NODE_HEIGHT)));
+        const edges = layout.edges.map(edge => ({ edge, lift: this._isoEdgeLift(slabs, layout, edge) }))
+            .sort((a, b) => a.lift - b.lift);
+        const projected = this._isoProjectedLayout(layout, slabs);
+        const scene = [];
+        // Level by level: the slabs of the level, the edges that run on them, then the blocks standing on them
+        const levels = [...new Set([0, ...slabs.map(s => s.level * ISO_SLAB_DEPTH + ISO_SLAB_DEPTH), ...nodes.map(n => n.lift)])].sort((a, b) => a - b);
+        for (const level of levels) {
+            for (const slab of slabs.filter(s => s.level * ISO_SLAB_DEPTH === level)) {
+                scene.push(this._renderIsoSlab(slab));
+            }
+            for (const { edge, lift } of edges.filter(e => e.lift === level)) {
+                scene.push(this._renderEdge(edge, layout, focus, lift));
+            }
+            if (level === 0) {
+                scene.push(this._renderReplayRoute(layout, slabs));
+            }
+            for (const { node, lift } of nodes.filter(n => n.lift === level)) {
+                scene.push(this._renderIsoNode(node, focus, lift));
+            }
+        }
+        return svg`${scene}
+            ${layout.titles.map(t => {
+                const p = this._isoPoint(t.x, t.y);
+                return svg`<text class="layer-title" x="${p.x}" y="${p.y - this._isoLiftAt(slabs, t.x, t.y + 8) - ISO_SLAB_DEPTH}" text-anchor="middle">${t.text}</text>`;
+            })}
+            ${this._renderReplayMarks(projected)}
+            ${this._renderTrafficMarks(projected)}
+            ${this._renderMetricMarks(projected)}`;
+    }
+
+    _renderIsoSlab(slab) {
+        const lift = slab.level * ISO_SLAB_DEPTH;
+        const fill = slab.cls === 'band' ? 'var(--lumo-contrast-5pct)' : 'var(--lumo-contrast-5pct)';
+        return svg`
+            ${this._isoFaces(slab.x, slab.y, slab.width, slab.height, ISO_SLAB_DEPTH, lift, 'var(--lumo-base-color)', 'iso-slab-face')}
+            <g transform="${this._isoTransform(lift + ISO_SLAB_DEPTH)}">
+                <rect class="${slab.cls} iso-slab" x="${slab.x}" y="${slab.y}" width="${slab.width}" height="${slab.height}" rx="4" style="fill: ${fill}"></rect>
+                ${slab.title && !this._isoUprightLabels ? svg`<text class="boundary-title" x="${slab.x + 14}" y="${slab.y + 20}">${slab.title}</text>` : nothing}
+            </g>
+            ${slab.title && this._isoUprightLabels ? (() => {
+                const p = this._isoPoint(slab.x + 14, slab.y + 20);
+                return svg`<text class="boundary-title iso-upright" x="${p.x}" y="${p.y - lift - ISO_SLAB_DEPTH}">${slab.title}</text>`;
+            })() : nothing}`;
+    }
+
+    /**
+     * A node as a block: two side faces in screen space, the C4 shape as the top face, and the text either lying
+     * on the top face or standing upright over it.
+     */
+    _renderIsoNode(node, focus, lift) {
+        const faded = focus && !focus.has(node.id);
+        const step = this._currentStep();
+        const selected = this._selected === node.id || (step !== null && step.node === node.id);
+        const w = node.width || NODE_WIDTH;
+        const h = node.height || NODE_HEIGHT;
+        const style = node.style || C4.component;
+        const top = node.textTop || 0;
+        const cx = w / 2;
+        const lines = node.lines || [];
+        const text = svg`<g fill="${style.text}">
+                <text class="node-name" x="${cx}" y="${top + 26}" text-anchor="middle">${this._truncate(node.name, Math.floor(w / 8.5))}</text>
+                <text class="node-type" x="${cx}" y="${top + 44}" text-anchor="middle">${this._truncate(node.type, Math.floor(w / 6.2))}</text>
+                ${lines.map((line, i) => svg`<text class="node-text" x="${cx}" y="${top + 64 + i * 16}" text-anchor="middle">${this._truncate(line, Math.floor(w / 6.4))}</text>`)}
+            </g>`;
+        const centre = this._isoPoint(node.x + cx, node.y + h / 2);
+        const upright = this._isoUprightLabels;
+        return svg`
+            <g class="node ${faded ? 'faded' : ''} ${selected ? 'selected' : ''}"
+               @click=${(e) => this._select(e, node.id)}
+               @dblclick=${(e) => this._zoomInto(e, node)}>
+                <title>${node.title || node.name}</title>
+                ${this._isoFaces(node.x, node.y, w, h, ISO_BLOCK_DEPTH, lift, style.fill, 'iso-block-face')}
+                <g transform="${this._isoTransform(lift + ISO_BLOCK_DEPTH)} translate(${node.x} ${node.y})">
+                    <g class="shape">${this._shape(node.shape, w, h, style.fill)}</g>
+                    ${this._shape(node.shape, w, h, 'none', 'outline')}
+                    ${upright ? nothing : text}
+                    ${node.devService ? svg`
+                        <rect class="badge" x="${cx - 35}" y="${h - 22}" width="70" height="14" rx="7"></rect>
+                        <text class="badge-text" x="${cx}" y="${h - 12}" text-anchor="middle">DEV SERVICE</text>` : nothing}
+                </g>
+                ${upright ? svg`<g class="iso-upright" transform="translate(${centre.x - cx} ${centre.y - lift - ISO_BLOCK_DEPTH - (top + 44 + lines.length * 16) / 2})">${text}</g>` : nothing}
+            </g>`;
+    }
+
+    /**
+     * A layout whose nodes are the upright boxes around the projected blocks, so that the pills of the marks land
+     * above and below the blocks.
+     */
+    _isoProjectedLayout(layout, slabs) {
+        const byId = new Map();
+        const nodes = [];
+        for (const node of layout.nodes) {
+            const w = node.width || NODE_WIDTH;
+            const h = node.height || NODE_HEIGHT;
+            const lift = this._isoNodeLift(slabs, node) + ISO_BLOCK_DEPTH;
+            const corners = [this._isoPoint(node.x, node.y), this._isoPoint(node.x + w, node.y),
+                this._isoPoint(node.x + w, node.y + h), this._isoPoint(node.x, node.y + h)];
+            const ys = corners.map(c => c.y - lift);
+            const centre = this._isoPoint(node.x + w / 2, node.y + h / 2);
+            const box = { ...node, x: centre.x - w / 2, y: Math.min(...ys), width: w, height: Math.max(...ys) - Math.min(...ys) + ISO_BLOCK_DEPTH };
+            byId.set(node.id, box);
+            nodes.push(box);
+        }
+        return { ...layout, byId, nodes };
     }
 
     _renderNode(node, focus) {
@@ -917,7 +1161,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
         return details.slice(0, count);
     }
 
-    _renderEdge(edge, layout, focus) {
+    _renderEdge(edge, layout, focus, lift = null) {
         const source = layout.byId.get(edge.source);
         const target = layout.byId.get(edge.target);
         if (!source || !target) {
@@ -932,15 +1176,17 @@ export class QwcArchitecture extends QwcHotReloadElement {
         const width = traffic
             ? 1.5 + 5 * Math.log(traffic + 1) / Math.log(this._traffic.maxEdge + 1)
             : (highlight ? style.width + 1 : style.width);
-        return svg`
-            <g class="${faded ? 'faded' : ''}">
-                <path class="edge ${highlight ? 'highlight' : ''} ${traffic ? 'traffic' : ''}" d="${path.d}"
+        const line = svg`<path class="edge ${highlight ? 'highlight' : ''} ${traffic ? 'traffic' : ''}" d="${path.d}"
                       stroke-dasharray="${traffic ? '' : style.dash}" stroke-width="${width}"
                       marker-end="url(#${traffic ? 'arrow-traffic' : highlight ? 'arrow-highlight' : 'arrow'})">
                     <title>${traffic ? `${label}: ${traffic} calls` : label}</title>
-                </path>
-                ${traffic ? this._renderEdgeLabel(`${traffic}×`, path.mx, path.my)
-                    : (highlight || layout.showLabels) && edge.label ? this._renderEdgeLabel(this._truncate(edge.label, 34), path.mx, path.my) : nothing}
+                </path>`;
+        const mid = lift === null ? { x: path.mx, y: path.my } : (p => ({ x: p.x, y: p.y - lift }))(this._isoPoint(path.mx, path.my));
+        return svg`
+            <g class="${faded ? 'faded' : ''}">
+                ${lift === null ? line : svg`<g transform="${this._isoTransform(lift)}">${line}</g>`}
+                ${traffic ? this._renderEdgeLabel(`${traffic}×`, mid.x, mid.y)
+                    : (highlight || layout.showLabels) && edge.label ? this._renderEdgeLabel(this._truncate(edge.label, 34), mid.x, mid.y) : nothing}
             </g>`;
     }
 
@@ -1765,7 +2011,7 @@ export class QwcArchitecture extends QwcHotReloadElement {
     /**
      * Draws the route of the current step over the edges, one path for each hop, in the order of the replay.
      */
-    _renderReplayRoute(layout) {
+    _renderReplayRoute(layout, slabs = null) {
         const step = this._currentStep();
         if (!step) {
             return nothing;
@@ -1778,7 +2024,9 @@ export class QwcArchitecture extends QwcHotReloadElement {
             const source = edge && layout.byId.get(edge.source), target = edge && layout.byId.get(edge.target);
             if (source && target) {
                 const path = edge.points ? this._routePath(edge.points) : this._edgePath(source, target, edge.offset || 0);
-                hops.push(svg`<path class="replay-route" d="${path.d}" data-reverse="${edge.source !== a}"></path>`);
+                const lift = slabs ? this._isoEdgeLift(slabs, layout, edge) : null;
+                const hop = svg`<path class="replay-route" d="${path.d}" data-reverse="${edge.source !== a}" data-lift="${lift === null ? '' : lift}"></path>`;
+                hops.push(lift === null ? hop : svg`<g transform="${this._isoTransform(lift)}">${hop}</g>`);
             }
         }
         return svg`${hops}<circle class="replay-dot" r="7" cx="-100" cy="-100"></circle>`;
@@ -1833,7 +2081,9 @@ export class QwcArchitecture extends QwcHotReloadElement {
             const hop = Math.min(routes.length - 1, Math.floor(progress * routes.length));
             const local = progress * routes.length - hop;
             const along = routes[hop].dataset.reverse === 'true' ? 1 - Math.min(1, local) : Math.min(1, local);
-            const point = routes[hop].getPointAtLength(along * lengths[hop]);
+            const floorPoint = routes[hop].getPointAtLength(along * lengths[hop]);
+            const lift = routes[hop].dataset.lift;
+            const point = lift === '' || lift === undefined ? floorPoint : (p => ({ x: p.x, y: p.y - Number(lift) }))(this._isoPoint(floorPoint.x, floorPoint.y));
             dot.setAttribute('cx', point.x);
             dot.setAttribute('cy', point.y);
             if (progress < 1) {
@@ -2346,13 +2596,28 @@ export class QwcArchitecture extends QwcHotReloadElement {
         }
         const reserved = 56;
         const available = canvas.clientHeight - reserved;
-        const scale = Math.min(1.2, Math.max(0.15, Math.min(canvas.clientWidth / this._layout.width,
-            available / this._layout.height)));
+        const bounds = this._bounds();
+        const scale = Math.min(1.2, Math.max(0.15, Math.min(canvas.clientWidth / bounds.width, available / bounds.height)));
         this._view = {
             scale,
-            x: (canvas.clientWidth - this._layout.width * scale) / 2,
-            y: reserved + Math.max(0, (available - this._layout.height * scale) / 2)
+            x: (canvas.clientWidth - bounds.width * scale) / 2 - bounds.x * scale,
+            y: reserved + Math.max(0, (available - bounds.height * scale) / 2) - bounds.y * scale
         };
+    }
+
+    /**
+     * The box around the drawn scene: the layout itself, or its projection with room for the raised blocks.
+     */
+    _bounds() {
+        const { width, height } = this._layout;
+        if (!this._iso) {
+            return { x: 0, y: 0, width, height };
+        }
+        const corners = [this._isoPoint(0, 0), this._isoPoint(width, 0), this._isoPoint(width, height), this._isoPoint(0, height)];
+        const slabs = this._isoSlabs(this._layout);
+        const rise = (Math.max(0, ...slabs.map(s => s.level + 1)) * ISO_SLAB_DEPTH) + ISO_BLOCK_DEPTH + 40;
+        const xs = corners.map(c => c.x), ys = corners.map(c => c.y);
+        return { x: Math.min(...xs), y: Math.min(...ys) - rise, width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) + rise };
     }
 
     _onPointerDown(e) {
@@ -2408,9 +2673,10 @@ export class QwcArchitecture extends QwcHotReloadElement {
         const clone = source.cloneNode(true);
         const group = clone.querySelector('g');
         group.setAttribute('transform', '');
-        clone.setAttribute('viewBox', `0 0 ${this._layout.width} ${this._layout.height}`);
-        clone.setAttribute('width', this._layout.width);
-        clone.setAttribute('height', this._layout.height);
+        const bounds = this._bounds();
+        clone.setAttribute('viewBox', `${bounds.x} ${bounds.y} ${bounds.width} ${bounds.height}`);
+        clone.setAttribute('width', bounds.width);
+        clone.setAttribute('height', bounds.height);
         const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
         const computed = getComputedStyle(this);
         let cssText = QwcArchitecture.styles.cssText;

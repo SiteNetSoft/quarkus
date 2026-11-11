@@ -333,6 +333,8 @@ export const templates = {
     'architecture-zoom-in': 'Zoom in',
     'architecture-zoom-out': 'Zoom out',
     'architecture-fit': 'Fit to screen',
+    'architecture-iso': 'Isometric view',
+    'architecture-iso-labels': 'Upright labels',
     'architecture-details': 'Details',
     'architecture-depends-on': 'Depends on',
     'architecture-used-by': 'Used by',
