@@ -1,8 +1,8 @@
 package io.quarkus.vertx.http.runtime.devmode;
 
+import java.lang.ref.WeakReference;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -57,9 +57,16 @@ public class VertxHttpHotReplacementSetup implements HotReplacementSetup {
         hotReplacementContext.addPreRestartStep(new Runnable() {
             @Override
             public void run() {
-                // If not on a worker thread then attempt to re-initialize the dev mode executor
-                if (!Context.isOnWorkerThread()) {
-                    QuarkusExecutorFactory.reinitializeDevModeExecutor();
+                try {
+                    // If not on a worker thread then attempt to re-initialize the dev mode executor
+                    if (!Context.isOnWorkerThread()) {
+                        QuarkusExecutorFactory.reinitializeDevModeExecutor();
+                    }
+                } finally {
+                    // Mark the restart as started: requests now wait for the restarted application. Done here, not
+                    // when the application stops (it also stops on exit and on dev mode shutdown), and only after the
+                    // executor is re-initialized, as that rejects or drops the waiting requests queued on it
+                    restartingFrom = new WeakReference<>(VertxHttpRecorder.getCurrentApplicationState());
                 }
             }
         });
@@ -85,17 +92,19 @@ public class VertxHttpHotReplacementSetup implements HotReplacementSetup {
     private static final Set<HttpConnection> waitingConnections = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     /**
-     * The application state at the time the application was last shut down for a restart. Until the restarted
+     * The application state at the time the last restart of the application began. Until the restarted
      * application has installed its root handler, the state is still this one and requests must not be dispatched
-     * to the handlers of the stopped application.
+     * to the handlers of the application being stopped.
+     * <p>
+     * Weak, so that the replaced application can be garbage collected: the current state references it strongly for
+     * as long as the comparison can be true.
      */
-    private static volatile Object restartingFrom;
+    private static volatile WeakReference<Object> restartingFrom = new WeakReference<>(null);
 
     public static void handleDevModeRestart() {
-        restartingFrom = VertxHttpRecorder.getCurrentApplicationState();
-        if (DevConsoleManager.isDoingHttpInitiatedReload()) {
-            return;
-        }
+        //close all connections, except those with a request waiting for the restart (including the one that triggered it)
+        //this prevents long-running requests such as SSE or websockets
+        //from holding onto the old deployment
         Set<ConnectionBase> cons = VertxHttpHotReplacementSetup.openConnections;
         if (cons != null) {
             for (ConnectionBase con : cons) {
@@ -111,11 +120,24 @@ public class VertxHttpHotReplacementSetup implements HotReplacementSetup {
      * for changes, is in progress.
      */
     private static boolean isRestarting() {
-        Object from = restartingFrom;
+        Object from = restartingFrom.get();
         return from != null && from == VertxHttpRecorder.getCurrentApplicationState();
     }
 
+    /**
+     * Whether requests must wait for a restart in progress.
+     * <p>
+     * Not with a deployment problem: a restart that failed at build time installs no root handler, so
+     * {@link #isRestarting()} stays true, but requests get the error page and never reach the stopped application.
+     * Waiting would make each of them scan, and a scan with a deployment problem always restarts.
+     */
+    private static boolean isRestartInProgress(Throwable deploymentProblem) {
+        return deploymentProblem == null && isRestarting();
+    }
+
     void handleHotReplacementRequest(RoutingContext routingContext) {
+        // the application this request was dispatched to, to detect a restart (whatever triggers it) while it waits
+        Object currentState = VertxHttpRecorder.getCurrentApplicationState();
         if (openConnections == null) {
             synchronized (VertxHttpHotReplacementSetup.class) {
                 if (openConnections == null) {
@@ -134,8 +156,9 @@ public class VertxHttpHotReplacementSetup implements HotReplacementSetup {
                 });
             }
         }
-        if (tempDeploymentProblem != null) {
-            handleDeploymentProblem(routingContext, tempDeploymentProblem);
+        Throwable scanDeploymentProblem = tempDeploymentProblem;
+        if (scanDeploymentProblem != null) {
+            handleDeploymentProblem(routingContext, scanDeploymentProblem);
             return;
         }
         if (hotReplacementContext.getDeploymentProblem() != null && routingContext.request().path().endsWith(CONFIG_FIX)) {
@@ -169,13 +192,17 @@ public class VertxHttpHotReplacementSetup implements HotReplacementSetup {
             routingContext.request().resume();
             return;
         }
-        if ((nextUpdate > System.currentTimeMillis() &&
+        // read once: a new restart attempt clears it right after stopping the application, a second read could let
+        // the request reach the stopped one
+        Throwable deploymentProblem = hotReplacementContext.getDeploymentProblem();
+        if (((nextUpdate > System.currentTimeMillis() &&
                 !hotReplacementContext.isTest() &&
-                !DevConsoleManager.isDoingHttpInitiatedReload() // if there is a live reload possibly going on we don't want to let a request through to restarting application, this is best effort, but it narrows the window a lot
-                && !isRestarting())
-                || routingContext.request().headers().contains(HEADER_NAME)) {
-            if (hotReplacementContext.getDeploymentProblem() != null) {
-                handleDeploymentProblem(routingContext, hotReplacementContext.getDeploymentProblem());
+                !DevConsoleManager.isDoingHttpInitiatedReload()) // if there is a live reload possibly going on we don't want to let a request through to restarting application, this is best effort, but it narrows the window a lot
+                || routingContext.request().headers().contains(HEADER_NAME))
+                // also when dispatched again after a restart: another one may have started
+                && !isRestartInProgress(deploymentProblem)) {
+            if (deploymentProblem != null) {
+                handleDeploymentProblem(routingContext, deploymentProblem);
                 return;
             }
             routingContext.next();
@@ -193,11 +220,13 @@ public class VertxHttpHotReplacementSetup implements HotReplacementSetup {
                     //the blocking pool may have a stale TCCL
                     Thread.currentThread().setContextClassLoader(current);
                     boolean restart = false;
-                    Object currentState = VertxHttpRecorder.getCurrentApplicationState();
                     synchronized (VertxHttpHotReplacementSetup.this) {
                         // a restart triggered by another source is waited for through the scan lock, whatever the
                         // time of the last scan
-                        if (nextUpdate < System.currentTimeMillis() || hotReplacementContext.isTest() || isRestarting()) {
+                        // the deployment problem is read again: requests queued on this monitor during a failed restart
+                        // must not each retry it
+                        if (nextUpdate < System.currentTimeMillis() || hotReplacementContext.isTest()
+                                || isRestartInProgress(hotReplacementContext.getDeploymentProblem())) {
                             nextUpdate = System.currentTimeMillis() + HOT_REPLACEMENT_INTERVAL;
                             try {
                                 tempDeploymentProblem = hotReplacementContext.getDeploymentProblem();
@@ -209,26 +238,10 @@ public class VertxHttpHotReplacementSetup implements HotReplacementSetup {
                             }
                         }
                     }
-                    if (currentState != VertxHttpRecorder.getCurrentApplicationState()) {
-                        //its possible a Kafka message or some other source triggered a reload,
-                        //so we could wait for the restart (due to the scan lock)
-                        //but then fail to dispatch to the new application
-                        restart = true;
-                    }
                     if (hotReplacementContext.getDeploymentProblem() != null) {
                         throw new NoStackTraceException(hotReplacementContext.getDeploymentProblem());
                     }
-                    if (restart) {
-                        //close all connections on close, except for this one
-                        //this prevents long-running requests such as SSE or websockets
-                        //from holding onto the old deployment
-                        Set<ConnectionBase> connections = new HashSet<>(openConnections);
-                        for (ConnectionBase con : connections) {
-                            if (con != connection && !waitingConnections.contains(con)) {
-                                con.close();
-                            }
-                        }
-                    }
+                    // the connections were closed by handleDevModeRestart()
                     return restart;
                 }
             }, false).onComplete(new Handler<AsyncResult<Boolean>>() {
@@ -240,9 +253,21 @@ public class VertxHttpHotReplacementSetup implements HotReplacementSetup {
                     if (result.failed()) {
                         handleDeploymentProblem(routingContext, result.cause());
                     } else {
-                        boolean restart = result.result();
+                        boolean restartedByThisRequest = result.result();
+                        boolean restart = restartedByThisRequest;
+                        // checked on the event loop, right before dispatching:
+                        //its possible a Kafka message or some other source triggered a reload,
+                        //so we could wait for the restart (due to the scan lock)
+                        //but then fail to dispatch to the new application
+                        if (currentState != VertxHttpRecorder.getCurrentApplicationState()) {
+                            restart = true;
+                        }
                         if (restart) {
-                            QuarkusExecutorFactory.reinitializeDevModeExecutor();
+                            if (restartedByThisRequest) {
+                                // once per restart: it drops the queued tasks of the other waiting requests
+                                // (a restart from another thread did it in the pre-restart step)
+                                QuarkusExecutorFactory.reinitializeDevModeExecutor();
+                            }
                             routingContext.request().headers().set(HEADER_NAME, "true");
                             VertxHttpRecorder.getRootHandler().handle(routingContext.request());
                         } else {

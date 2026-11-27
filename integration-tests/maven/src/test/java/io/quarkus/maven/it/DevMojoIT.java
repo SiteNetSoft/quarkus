@@ -13,14 +13,17 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.StringWriter;
-import java.net.HttpURLConnection;
 import java.net.Socket;
-import java.net.URL;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -360,27 +363,35 @@ public class DevMojoIT extends LaunchMojoTestBase {
 
         File source = new File(testDir, "src/main/java/org/acme/Greeting.java");
         String url = "http://localhost:" + getPort() + "/greeting";
-        ExecutorService executor = Executors.newFixedThreadPool(8);
+        String triggerUrl = "http://localhost:" + getPort() + "/trigger";
+        // more clients than worker threads (quarkus.thread-pool.max-threads=2 in the project): requests waiting for a
+        // restart queue on the worker pool, which must not lose them
+        int clients = 64;
+        ExecutorService executor = Executors.newFixedThreadPool(clients);
         try {
-            for (int round = 1; round <= 3; round++) {
+            // the second round restarts an application that was itself restarted
+            for (int round = 1; round <= 2; round++) {
                 String expected = "hello " + round;
-                // a request first: for the next two seconds the hot replacement handler lets requests through
-                // without scanning, which is when a restart it did not trigger must still be noticed
-                devModeClient.getHttpResponse("/greeting");
+                // a request scanning (interval elapsed) opens the two seconds during which requests are let through
+                // without scanning: a restart triggered elsewhere must still be noticed then
+                Thread.sleep(2100);
+                assertThat(get(url)).isEqualTo("200 hello " + (round - 1));
                 filter(source, Collections.singletonMap("hello " + (round - 1), expected));
 
-                // the message makes the messaging extension scan and restart from its own thread
-                devModeClient.getHttpResponse("/trigger");
+                // within that window, the message makes the messaging extension scan and restart from its own thread
+                assertThat(get(triggerUrl)).isEqualTo("200 triggered");
 
                 List<Future<List<String>>> workers = new ArrayList<>();
-                for (int i = 0; i < 8; i++) {
+                for (int i = 0; i < clients; i++) {
                     workers.add(executor.submit(() -> {
+                        // until the restarted application answers, however long the restart takes
                         List<String> responses = new ArrayList<>();
-                        long end = System.currentTimeMillis() + 4000;
-                        while (System.currentTimeMillis() < end) {
-                            responses.add(get(url));
-                            Thread.sleep(5);
-                        }
+                        long deadline = System.currentTimeMillis() + 10_000;
+                        String response;
+                        do {
+                            response = get(url);
+                            responses.add(response);
+                        } while (!response.equals("200 " + expected) && System.currentTimeMillis() < deadline);
                         return responses;
                     }));
                 }
@@ -399,21 +410,103 @@ public class DevMojoIT extends LaunchMojoTestBase {
         } finally {
             executor.shutdownNow();
         }
+        // the scenario was exercised: a restart not performed by an HTTP request. Not required of every round, as on
+        // a slow machine an HTTP request may scan first
+        assertThat(running.log().lines()
+                .filter(line -> line.contains("Restarting quarkus") && !line.contains("(vert.x-")))
+                .as("restarts performed by the messaging extension")
+                .isNotEmpty();
     }
 
+    /**
+     * Reuses its connections: one per request exhausts the ephemeral ports of some systems (macOS, Windows) in seconds.
+     */
+    private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)
+            .connectTimeout(Duration.ofSeconds(5))
+            .build();
+
     private static String get(String url) {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(30)).build();
         try {
-            HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
-            connection.setReadTimeout(30_000);
-            int status = connection.getResponseCode();
-            // close the stream instead of calling disconnect(), so that the next request reuses the connection
-            try (InputStream stream = status < 400 ? connection.getInputStream() : connection.getErrorStream()) {
-                String body = stream == null ? "" : new String(stream.readAllBytes(), StandardCharsets.UTF_8).strip();
-                return status + " " + (status < 400 ? body : body.lines().findFirst().orElse(""));
+            HttpResponse<String> response;
+            try {
+                response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            } catch (HttpTimeoutException e) {
+                throw e;
+            } catch (IOException e) {
+                // a restart closes idle connections, possibly right after a request was sent on one: retry once, like
+                // browsers, as the server never started to answer
+                response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
             }
+            String body = response.body().strip();
+            return response.statusCode() + " "
+                    + (response.statusCode() < 400 ? body : body.lines().findFirst().orElse(""));
         } catch (IOException e) {
             return "error " + e.getMessage();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return "error interrupted";
         }
+    }
+
+    @Test
+    public void testRequestsAfterAFailedRestartAreThrottled() throws Exception {
+        testDir = initProject("projects/dev-mode-external-restart", "projects/project-dev-mode-failed-restart");
+        run(true);
+        assertThat(devModeClient.getHttpResponse("/greeting")).isEqualTo("hello 0");
+
+        // an unsatisfied dependency makes the next restart fail at build time
+        File missing = new File(testDir, "src/main/java/org/acme/Missing.java");
+        File broken = new File(testDir, "src/main/java/org/acme/Broken.java");
+        Files.writeString(missing.toPath(), "package org.acme;\n\npublic interface Missing {\n}\n");
+        Files.writeString(broken.toPath(), """
+                package org.acme;
+
+                import jakarta.enterprise.context.ApplicationScoped;
+                import jakarta.inject.Inject;
+
+                import io.quarkus.arc.Unremovable;
+
+                @ApplicationScoped
+                @Unremovable
+                public class Broken {
+
+                    @Inject
+                    Missing missing;
+                }
+                """);
+        await()
+                .pollDelay(100, TimeUnit.MILLISECONDS)
+                .atMost(TestUtils.getDefaultTimeout(), TimeUnit.MINUTES)
+                .until(() -> devModeClient.getHttpResponse("/greeting", true).contains("Error restarting Quarkus"));
+        // the output of the dev mode process reaches the log asynchronously
+        await().atMost(TestUtils.getDefaultTimeout(), TimeUnit.MINUTES).until(() -> countFailedStarts() > 0);
+
+        // a scan with a deployment problem always restarts: requests must stay throttled to one scan per interval
+        String url = "http://localhost:" + getPort() + "/greeting";
+        long failedStartsBefore = countFailedStarts();
+        long start = System.currentTimeMillis();
+        for (int i = 0; i < 20; i++) {
+            assertThat(get(url)).startsWith("500 ");
+        }
+        long elapsed = System.currentTimeMillis() - start;
+        long attempts = countFailedStarts() - failedStartsBefore;
+        assertThat(attempts).as("restart attempts for 20 requests over %d ms", elapsed)
+                // one scan per interval, plus one for a scan in flight when counting started
+                .isLessThanOrEqualTo(elapsed / 2000 + 2);
+
+        // and the application recovers once the problem is fixed
+        Files.delete(broken.toPath());
+        Files.delete(missing.toPath());
+        await()
+                .pollDelay(100, TimeUnit.MILLISECONDS)
+                .atMost(TestUtils.getDefaultTimeout(), TimeUnit.MINUTES)
+                .until(() -> devModeClient.getHttpResponse("/greeting", true).equals("hello 0"));
+    }
+
+    private long countFailedStarts() throws IOException {
+        return running.log().lines().filter(line -> line.contains("Failed to start quarkus")).count();
     }
 
     @Test
